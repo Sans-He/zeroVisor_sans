@@ -1,0 +1,42 @@
+#include <linux/types.h>
+
+/* Functions impelement by asm */
+extern void zv_enable_vmx(void);
+extern void zv_disable_vmx(void);
+extern u64 zv_get_cpuid(void);
+extern u64 zv_get_cr0(void);
+extern void zv_set_cr0(u64 cr0);
+extern u64 zv_get_cr2(void);
+extern u64 zv_get_cr3(void);
+extern void zv_set_cr3(u64);
+extern u64 zv_get_cr4(void);
+extern u64 zv_get_cr8(void);
+extern u64 zv_get_cs(void);
+extern u64 zv_get_ss(void);
+extern u64 zv_get_ds(void);
+extern u64 zv_get_es(void);
+extern u64 zv_get_fs(void);
+extern u64 zv_get_gs(void);
+extern u64 zv_get_tr(void);
+extern u64 zv_get_dr7(void);
+extern u64 zv_get_rflags(void);
+extern u64 zv_get_ldtr(void);
+extern void zv_set_cr4(u64 cr4);
+extern int zv_start_vmx(void* vmcs);
+extern int zv_clear_vmcs(void* guest_vmcs);
+extern int zv_load_vmcs(void** guest_vmcs);
+extern int zv_write_vmcs(u64 reg_index, u64 value);
+extern int zv_read_vmcs(u64 reg_index, u64* value);
+extern void zv_stop_vmx(void);
+extern u64 zv_rdmsr(u64 msr_index);
+extern void zv_wrmsr(u64 msr_index, u64 value);
+extern int zv_vm_launch(void);
+extern int zv_vm_resume(void);
+extern u64 zv_get_rip(void);
+extern void zv_vm_exit_callback_stub(void);
+extern void zv_invd(void);
+extern void zv_flush_gdtr(void);
+extern void zv_gen_int(u64 number);
+extern void zv_pause_loop(void);
+extern void zv_vm_call(u64 svr_num, void* arg);
+extern void zv_restore_context_from_stack(u64 stack_addr);
