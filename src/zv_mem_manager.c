@@ -14,10 +14,10 @@ static DEFINE_SPINLOCK(zv_alloc_list_lock); // for multi-thread safe
 static void zv_track_alloc(void* ptr, enum zv_mem_type type) {
     struct zv_alloc_node* node;
 
-    if(!ptr) return ;
+    if (! ptr) return;
 
     node = kmalloc(sizeof(*node), GFP_KERNEL);
-    if(!node) return;
+    if (! node) return;
 
     node -> ptr = ptr;
     node -> type = type;

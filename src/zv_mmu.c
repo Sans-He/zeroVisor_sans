@@ -409,6 +409,20 @@ void zv_set_ept_hide_page(u64 phy_addr) {
     zv_set_ept_page_addr(phy_addr, 0); // guest access -> #PF
 }
 
+/*
+ * Lock a physical page to protect it from the guest.
+ */
+void zv_set_ept_lock_page(u64 phy_addr) {
+	zv_set_ept_page_flags(phy_addr, EPT_READ | EPT_EXECUTE | EPT_BIT_MEM_TYPE_WB);
+	zv_set_ept_page_addr(phy_addr, phy_addr);
+}
+
+/* Set all permissions to a physical page */
+void zv_set_ept_all_access_page(u64 phy_addr) {
+    zv_set_ept_page_flags(phy_addr, EPT_ALL_ACCESS | EPT_BIT_MEM_TYPE_WB);
+    zv_set_ept_page_addr(phy_addr, phy_addr);
+}
+
 /* Set permissions to a physical page in EPT */
 static void zv_set_ept_page_flags(u64 phy_addr, u32 flags) {
     u64 page_offset;

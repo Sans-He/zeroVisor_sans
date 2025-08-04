@@ -74,6 +74,8 @@ struct zv_ept_pagetable
 
 
 /* Variables */
+extern struct zv_ept_info g_ept_info;
+
 
 /* The function protocol for walk_system_ram_range. */
 typedef int (*my_walk_system_ram_range) (unsigned long start_pfn, unsigned long nr_pages, 
@@ -88,4 +90,6 @@ void zv_setup_ept_pagetables(void);
 void* zv_get_pagetable_log_addr(int type, int index);
 void* zv_get_pagetable_phy_addr(int type, int index);
 void zv_set_ept_hide_page(u64 phy_addr);
+void zv_set_ept_lock_page(u64 phy_addr);
+void zv_set_ept_all_access_page(u64 phy_addr);
 void zv_protect_ept_pages(void);

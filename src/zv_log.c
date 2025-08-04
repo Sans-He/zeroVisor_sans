@@ -47,6 +47,13 @@ void zv_log_write(
     vsnprintf(entry->msg, ZV_LOG_MSG_LEN, fmt, args);
     va_end(args);
 
+    /* For Debug */
+    printk(KERN_INFO "%s[%d] %s: %s\n",
+        tag,
+        entry->pid,
+        log_level_str[entry->level],
+        entry->msg);
+
     zv_log_buf.head = (zv_log_buf.head + 1) % ZV_LOG_RING_SIZE;
 
     // if buffer is full
