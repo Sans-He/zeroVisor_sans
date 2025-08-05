@@ -449,10 +449,23 @@ void zv_hide_range(u64 start_addr, u64 end_addr, int alloc_type) {
     u64 i;
     u64 data;
     u64 phy_addr;
+    u64 start_addr_page;
     u64 align_end_addr;
 
+    start_addr_page = start_addr & MASK_PAGEADDR;
     /* Round up the end address */
     align_end_addr = (end_addr + PAGE_SIZE - 1) & MASK_PAGEADDR;
+
+    /* For edge case : start_addr == end_addr && start_addr just align */
+    if (start_addr_page == align_end_addr) {
+        if (alloc_type == ALLOC_KMALLOC) {
+            phy_addr = virt_to_phys((void*)start_addr_page);
+        } else { // ALLOC_VMALLOC
+            phy_addr = PFN_PHYS(vmalloc_to_pfn((void*)start_addr_page));
+        }
+        zv_set_ept_hide_page(phy_addr);
+        return;
+    }
 
     for (i = (start_addr & MASK_PAGEADDR); i < align_end_addr; i += PAGE_SIZE) {
         data = *((u64*)i);
@@ -471,20 +484,33 @@ void zv_hide_range(u64 start_addr, u64 end_addr, int alloc_type) {
 void zv_lock_range(u64 start_addr, u64 end_addr, int alloc_type) {
     u64 i;
     u64 phy_addr;
+    u64 start_addr_page;
     u64 align_end_addr;
 
-    /* Round up the end address */
+    start_addr_page = start_addr & MASK_PAGEADDR;
+    /* Round up the address */
     align_end_addr = (end_addr + PAGE_SIZE - 1) & MASK_PAGEADDR;
 
-    for (i = (start_addr & MASK_PAGEADDR); i < align_end_addr; i += PAGE_SIZE) {
+    /* For edge case : start_addr == end_addr && start_addr just align */
+    if (start_addr_page == align_end_addr) {
+        if (alloc_type == ALLOC_KMALLOC) {
+            phy_addr = virt_to_phys((void*)start_addr_page);
+        } else { // ALLOC_VMALLOC
+            phy_addr = PFN_PHYS(vmalloc_to_pfn((void*)start_addr_page));
+        }
+        zv_set_ept_lock_page(phy_addr);
+        return;
+    }
+
+    for (i = start_addr_page; i < align_end_addr; i += PAGE_SIZE) {
         if (alloc_type == ALLOC_KMALLOC) {
             phy_addr = virt_to_phys((void*)i);
         } else { // ALLOC_VMALLOC
             phy_addr = PFN_PHYS(vmalloc_to_pfn((void*)i));
         }
-    }
 
-    zv_set_ept_lock_page(phy_addr);
+        zv_set_ept_lock_page(phy_addr);
+    }
 }
 
 /* Protect VMCS structure */
