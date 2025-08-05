@@ -9,6 +9,7 @@
 #include <linux/string.h>
 
 #include "../include/zv_log.h"
+#include "../include/zv_config.h"
 
 EXPORT_SYMBOL(zv_log_write);
 EXPORT_SYMBOL(zv_log_error);
@@ -47,12 +48,14 @@ void zv_log_write(
     vsnprintf(entry->msg, ZV_LOG_MSG_LEN, fmt, args);
     va_end(args);
 
+#ifdef ZEROVISOR_LOG_TO_KMSG
     /* For Debug */
     printk(KERN_INFO "%s[%d] %s: %s\n",
         tag,
         entry->pid,
         log_level_str[entry->level],
         entry->msg);
+#endif /* ZEROVISOR_LOG_TO_KMSG */
 
     zv_log_buf.head = (zv_log_buf.head + 1) % ZV_LOG_RING_SIZE;
 
@@ -67,6 +70,7 @@ void zv_log_error(int error_code) {
     zv_log_write(LOG_NONE, "Error", "Error Code: ", error_code);
 }
 
+/* —— /proc/zv_log —— */
 static int zv_log_proc_show(struct seq_file *msg, void *v) {
     size_t i;
     unsigned long flags;
@@ -105,20 +109,63 @@ static const struct proc_ops zv_log_proc_fops = {
     .proc_release = single_release,
 };
 
+/* —— /proc/zv_log_level —— */
+static ssize_t zv_log_level_switch(
+    struct file* file,
+    const char __user *buf,
+    size_t count,
+    loff_t* ppos
+) {
+    char kbuf[32];
+    char lvl_name[16];
+    int i;
+
+    if (count == 0 || count >= sizeof(kbuf))
+        return -EINVAL;
+
+    if (copy_from_user(kbuf, buf, count))
+        return -EFAULT;
+    kbuf[count] = '\0';
+
+    if (sscanf(kbuf, "log level = %15s", lvl_name) != 1)
+        return -EINVAL;
+
+    for (i = 0; i <= LOG_DETAIL; i++) {
+        if (strcmp(lvl_name, log_level_str[i]) == 0)
+            break;
+    }
+    if (i > LOG_DETAIL)
+        return -EINVAL;
+
+    zv_log_buf.max_level = i;
+    zv_log_write(LOG_NORMAL, "zvlog",
+                 "log level changed to %s(%d)",
+                 log_level_str[i], i);
+
+    return count;
+}
+
+static const struct proc_ops zv_log_level_fops = {
+    .proc_write   = zv_log_level_switch,
+};
+
+
 // INIT 
 void zv_log_init(void) {
     spin_lock_init(&zv_log_buf.lock);
     zv_log_buf.head = 0;
     zv_log_buf.tail = 0;
-    zv_log_buf.max_level = LOG_DETAIL;
+    zv_log_buf.max_level = LOG_NORMAL;
 
     proc_create("zv_log", 0444, NULL, &zv_log_proc_fops);
+    proc_create("zv_log_level", 0222, NULL, &zv_log_level_fops);
 
     zv_log_write(LOG_NORMAL, "init", "zeroVisor log system initialized");
 }
 
 // EXIT
 void zv_log_exit(void) {
+    remove_proc_entry("zv_log_level", NULL);
     remove_proc_entry("zv_log", NULL);
 }
 

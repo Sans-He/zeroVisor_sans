@@ -1176,11 +1176,18 @@ static void zv_setup_vm_control_register(
     sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_RDTSCP;
     /* Enable xsaves/xrstors instruments */
     sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_XSAVES_XRSTORS;
-
+    
     if (( zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2) >> 32) 
         & VM_BIT_VM_SEC_PROC_CTRL_ENABLE_INVPCID) {
         zv_log_write(LOG_DEBUG, "Core", "VM [%d] Support Enable INVPCID", cpu_id);
         sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_INVPCID;
+    }
+
+    if (( zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2) >> 32) 
+        & VM_BIT_VM_SEC_PROC_CTRL_ENABLE_USER_WAIT_PAUSE) {
+        zv_log_write(LOG_DEBUG, "Core", "VM [%d] Support Enable USER_WAIT_PAUSE", cpu_id);
+        /* Enable tpause,umonitor or umwait instruments */
+        sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_USER_WAIT_PAUSE;
     }
 
     zv_vm_control_register->pin_based_ctrl = 

@@ -12,6 +12,7 @@
  * 
  */
 #define ZEROVISOR_USE_SHUTDOWN                  1
+#define ZEROVISOR_LOG_TO_KMSG					1
 
 /* Utility macros. */
 #define CEIL(X, Y)						        (((X) + (Y) - 1) / (Y))
@@ -145,6 +146,7 @@
 #define VM_BIT_VM_SEC_PROC_CTRL_UNREST_GUEST	(0x01 << 7)
 #define VM_BIT_VM_SEC_PROC_CTRL_ENABLE_INVPCID  (0x01 << 12)
 #define VM_BIT_VM_SEC_PROC_CTRL_ENABLE_XSAVES_XRSTORS	(0x01 << 20)
+#define VM_BIT_VM_SEC_PROC_CTRL_ENABLE_USER_WAIT_PAUSE	(0x01 << 26)
 
 /* MISC flags. */
 #define VM_BIT_VM_MISC_SAVE_LMA_TO_VMCS			(0x01 << 5)

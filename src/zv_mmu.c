@@ -400,7 +400,7 @@ void zv_protect_ept_pages(void) {
 /*
  * Hide a physical page to protect it from the guest.
  *
- * When zeroVisor sets no permission to the page, error is occured in some system. 
+ * When zeroVisor sets no permission to the page, error is occured in some system.
  * So, for hiding a physical page, zeroVisor sets read-only permission to the page
  * and maps guest physical page to page number 0.
  */
