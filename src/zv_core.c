@@ -108,6 +108,16 @@ static void zv_setup_vmcs(
 static void zv_print_vm_result(const char* string, int result);
 static void zv_dup_page_table_for_host(void);
 
+static void func_test(void){
+    u64 base = 0x1000000;
+    u64 i = 0x00000;
+    for( i = 0 ; i <= 2000 ; i = i+0xA00){
+        if(guest_to_host(i+base) != i+base){
+            printk(KERN_INFO "function wrong , wrong addr : %16llX", i+base);
+        }
+    }
+} 
+
 /* support for ZEROVISOR_USE_SHUTDOWN*/
 #if ZEROVISOR_USE_SHUTDOWN
 /* Variables*/
@@ -193,6 +203,8 @@ static int __init zeroVisor_init(void) {
         goto ERROR_HANDLE;
     }
     zv_setup_ept_pagetables();
+
+    func_test();
 
     /* Protect the memory */
     zv_protect_ept_pages();

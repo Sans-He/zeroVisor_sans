@@ -452,5 +452,82 @@ static void zv_set_ept_page_addr(u64 phy_addr, u64 addr) {
 }
 
 
+void * check_addr_page(u64 x,int type,u64 page_addr,u64 pre_page_addr,u64 offset){
+	u64 real_log_addr = 0;
+    u64 index;
+	switch(type){
+		case EPT_TYPE_PDPTEPD:
+			real_log_addr = (u64)zv_get_pagetable_log_addr(EPT_TYPE_PDPTEPD,x/VAL_512GB);
+			break;
 
+		case EPT_TYPE_PDEPT:
+			real_log_addr = (u64)zv_get_pagetable_log_addr(EPT_TYPE_PDEPT,x/VAL_1GB);
+			break;
+
+		case EPT_TYPE_PTE:
+			real_log_addr = (u64)zv_get_pagetable_log_addr(EPT_TYPE_PTE,x/VAL_2MB);
+			break;
+		case EPT_TYPE_PHY:
+			real_log_addr = x&(~((u64)0xfff));
+			break;	
+		default:
+			break;
+	}
+	index = x/VAL_2MB;
+	//printk(KERN_INFO "page level : %d",type);
+	//printk(KERN_INFO "page_real_addr : %16lx page_addr : %16lx , PTE_INDEX: %16lx , page_phy_addr: %16lx , guest_phy_addr: %16lx",real_log_addr,page_addr,index,(u64)virt_to_phys(page_addr),x);
+
+	if(real_log_addr != page_addr){
+		printk(KERN_INFO "real_log_addr != page_addr! real_log_addr : %16llX page_addr : %16llX" , real_log_addr , page_addr);
+		if(type == EPT_TYPE_PHY){
+			((struct zv_ept_pagetable *)pre_page_addr)->entry[offset] = real_log_addr | EPT_ALL_ACCESS;
+		}else{
+			((struct zv_ept_pagetable *)pre_page_addr)->entry[offset] = virt_to_phys((void*)real_log_addr) | EPT_ALL_ACCESS;
+		}
+	}else{
+		//printk(KERN_INFO "real == page_addt");
+	}
+	
+	
+	return (void*)real_log_addr;
+}
+
+u64 guest_to_host(u64 x){
+	struct zv_ept_pagetable * ept_ptr;
+	struct zv_ept_pagetable * PDPE_addr;
+	struct zv_ept_pagetable * PDE_addr;
+	struct zv_ept_pagetable * PTE_addr;
+	struct zv_ept_pagetable * phy_addr;
+
+	u64 PML4E_offset = (x>>39) & MASK_EPT_OFFSET;
+	u64 PDPE_offset = (x>>30) & MASK_EPT_OFFSET;
+	u64 PDE_offset = (x>>21) & MASK_EPT_OFFSET;
+	u64 PTE_offset = (x>>12) & MASK_EPT_OFFSET;
+	u64 phy_offset = x & ~MASK_PAGEADDR;
+	
+	//printk(KERN_INFO "guest_to_host working");
+	ept_ptr = (void*)g_ept_info.pml4_page_addr_array[0];
+	//printk(KERN_INFO "ept_ptr : %p" ,ept_ptr);
+
+	PDPE_addr = CHANGE_ADDR(ept_ptr->entry[PML4E_offset])
+	//printk(KERN_INFO "PDPE_addr : %p" ,PDPE_addr);
+	PDPE_addr = check_addr_page(x,EPT_TYPE_PDPTEPD,(u64)PDPE_addr,(u64)ept_ptr,PML4E_offset);
+
+
+	PDE_addr = CHANGE_ADDR(PDPE_addr->entry[PDPE_offset])
+	//printk(KERN_INFO "PDE_addr : %p" ,PDE_addr);
+	PDE_addr = check_addr_page(x,EPT_TYPE_PDEPT,(u64)PDE_addr,(u64)PDPE_addr,PDPE_offset);
+
+
+	PTE_addr = CHANGE_ADDR(PDE_addr->entry[PDE_offset])
+	//printk(KERN_INFO "PTE_addr : %p" ,PTE_addr);
+	PTE_addr = check_addr_page(x,EPT_TYPE_PTE,(u64)PTE_addr,(u64)PDE_addr,PDE_offset);
+
+	
+	phy_addr = (void*)((PTE_addr->entry[PTE_offset])&(~((u64)0xfff)));
+	//printk(KERN_INFO "phy_addr : %p" ,phy_addr);
+	phy_addr = check_addr_page(x , EPT_TYPE_PHY, (u64)phy_addr , (u64)PTE_addr , PTE_offset);
+
+	return (u64)phy_addr +  phy_offset;
+} 
 

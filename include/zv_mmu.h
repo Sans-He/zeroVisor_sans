@@ -12,20 +12,22 @@
 #define VAL_4KB					((u64)4 * 1024)
 
 /* Page table flags. */
-#define MASK_PAGEFLAG			((u64) 0xFF00000000000FFF)
-#define MASK_PAGEFLAG_WO_DA		(((u64) 0xFF00000000000FFF) ^ (0x01 << 5) ^ (0x01 << 6))
+#define MASK_PAGEFLAG			((u64) 0xFFF0000000000FFF)
+#define MASK_PAGEFLAG_WO_DA		(((u64) 0xFFF0000000000FFF) ^ (0x01 << 5) ^ (0x01 << 6))
 #define MASK_INVALIDPAGEFLAG	((u64) 0x07FF000000000000)
 #define MASK_PAGE_SIZE_FLAG		(0x01 << 7)
 #define MASK_PAGEFLAG_WO_SIZE	(MASK_PAGEFLAG ^ MASK_PAGE_SIZE_FLAG)
 #define MASK_PRESENT_FLAG		(0x01 << 0)
 #define MASK_XD_FLAG			((u64)0x01 << 63)
 #define MASK_PAGEADDR			((u64) 0xFFFFFFFFFFFFF000)
+#define MASK_EPT_OFFSET         ((u64) 0x00000000000001FF)
 
 /* EPT page type. */
 #define EPT_TYPE_PML4			0
 #define EPT_TYPE_PDPTEPD		1
 #define EPT_TYPE_PDEPT			2   
 #define EPT_TYPE_PTE			3   
+#define EPT_TYPE_PHY            4
 
 /* EPT flags */
 #define EPT_READ				(0x01 << 0)
@@ -36,6 +38,9 @@
 #define EPT_BIT_MEM_TYPE_WB		(0x06 << 3)
 #define EPT_PAGE_ENT_COUNT		512
 #define EPT_PAGE_SIZE			4096
+
+/* Macro for GPA to HPA*/
+#define CHANGE_ADDR(x) phys_to_virt(((u64)x)&(~MASK_PAGEFLAG));
 
 /* Structures */
 
@@ -93,3 +98,6 @@ void zv_set_ept_hide_page(u64 phy_addr);
 void zv_set_ept_lock_page(u64 phy_addr);
 void zv_set_ept_all_access_page(u64 phy_addr);
 void zv_protect_ept_pages(void);
+/* Change GPA to HPA*/
+void* check_addr_page(u64 x,int type,u64 page_addr,u64 pre_page_addr,u64 offset);
+u64 guest_to_host(u64 x);
