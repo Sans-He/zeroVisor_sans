@@ -1,4 +1,5 @@
 #include <linux/types.h>
+#include <linux/xarray.h>
 
 /*
  * Macros.
@@ -39,6 +40,12 @@
 #define EPT_PAGE_ENT_COUNT		512
 #define EPT_PAGE_SIZE			4096
 
+/*define xarray to store ept page*/
+DEFINE_XARRAY(zv_pml4_table);
+DEFINE_XARRAY(zv_pdpte_pd_table);
+DEFINE_XARRAY(zv_pdept_table);
+DEFINE_XARRAY(zv_pte_table);
+
 /* Macro for GPA to HPA*/
 #define CHANGE_ADDR(x) phys_to_virt(((u64)x)&(~MASK_PAGEFLAG));
 
@@ -78,7 +85,7 @@ struct zv_ept_pagetable
 };
 
 
-/* Variables */
+/* VarSiables */
 extern struct zv_ept_info g_ept_info;
 
 
@@ -100,4 +107,6 @@ void zv_set_ept_all_access_page(u64 phy_addr);
 void zv_protect_ept_pages(void);
 /* Change GPA to HPA*/
 void* check_addr_page(u64 x,int type,u64 page_addr,u64 pre_page_addr,u64 offset);
+void zv_add_mem_range(u64 start, u64 end);
+
 u64 guest_to_host(u64 x);

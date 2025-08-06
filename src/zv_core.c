@@ -108,12 +108,13 @@ static void zv_setup_vmcs(
 static void zv_print_vm_result(const char* string, int result);
 static void zv_dup_page_table_for_host(void);
 
-static void func_test(void){
-    u64 base = 0x1000000;
+static void func_test(u64 start,u64 end){
     u64 i = 0x00000;
-    for( i = 0 ; i <= 2000 ; i = i+0xA00){
-        if(guest_to_host(i+base) != i+base){
-            printk(KERN_INFO "function wrong , wrong addr : %16llX", i+base);
+    for( i = start ; i <= end ; i+=EPT_PAGE_SIZE){
+        if(guest_to_host(i) != i){
+            printk(KERN_INFO "function wrong , wrong addr : %16llX", i);
+        }else if( i%100 == 0){
+            printk(KERN_INFO "function working smoothly , addr_now : %16llX", i);
         }
     }
 } 
@@ -203,8 +204,8 @@ static int __init zeroVisor_init(void) {
         goto ERROR_HANDLE;
     }
     zv_setup_ept_pagetables();
-
-    func_test();
+    zv_add_mem_range(0xfffff00000,0xfffff2ffff);
+    func_test(0xfffff00000,0xfffff2ffff);
 
     /* Protect the memory */
     zv_protect_ept_pages();
