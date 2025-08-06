@@ -112,7 +112,7 @@ static void func_test(u64 start,u64 end){
     u64 i = 0x00000;
     for( i = start ; i <= end ; i+=EPT_PAGE_SIZE){
         if(guest_to_host(i) != i){
-            printk(KERN_INFO "function wrong , wrong addr : %16llX", i);
+            printk(KERN_INFO "function wrong , wrong addr : %16llX , addr should be%16llX", guest_to_host(i) , i);
         }else if( i%100 == 0){
             printk(KERN_INFO "function working smoothly , addr_now : %16llX", i);
         }
@@ -204,8 +204,12 @@ static int __init zeroVisor_init(void) {
         goto ERROR_HANDLE;
     }
     zv_setup_ept_pagetables();
-    zv_add_mem_range(0xfffff00000,0xfffff2ffff);
-    func_test(0xfffff00000,0xfffff2ffff);
+    printk(KERN_INFO "adding mem range");
+    zv_add_mem_range(0xffff010000,0xfffff2ffff);
+    zv_add_mem_range(0xfffff30000,0xfffff4ffff);
+    mdelay(200);
+    printk(KERN_INFO "testing mem range");
+    func_test(0xffff010000,0xfffff4ffff);
 
     /* Protect the memory */
     zv_protect_ept_pages();

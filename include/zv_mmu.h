@@ -40,11 +40,16 @@
 #define EPT_PAGE_ENT_COUNT		512
 #define EPT_PAGE_SIZE			4096
 
+#ifndef XARRAY
+#define XARRAY
+    extern struct xarray zv_pml4_table;
+    extern struct xarray zv_pdpte_pd_table;
+    extern struct xarray zv_pdept_table;
+    extern struct xarray zv_pte_table;
+#endif // MACRO
+
 /*define xarray to store ept page*/
-DEFINE_XARRAY(zv_pml4_table);
-DEFINE_XARRAY(zv_pdpte_pd_table);
-DEFINE_XARRAY(zv_pdept_table);
-DEFINE_XARRAY(zv_pte_table);
+
 
 /* Macro for GPA to HPA*/
 #define CHANGE_ADDR(x) phys_to_virt(((u64)x)&(~MASK_PAGEFLAG));
