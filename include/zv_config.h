@@ -167,6 +167,9 @@
 #define VM_BIT_VM_ENTRY_INT_INFO_GP				(13 | VM_BIT_VM_ENTRY_INT_INFO_HW | \
 	VM_BIT_VM_ENTRY_INT_INFO_ERROR_CODE | VM_BIT_VM_ENTRY_INT_INFO_VALID)
 
+/* Except bit flag (by Intel SDM Vol.1 Table 6.1) */
+#define VM_BIT_EXCEPT_DEBUG						(0x01 << 1);
+
 /* Guest fields of VMCS.*/
 #define VM_GUEST_ES_SELECTOR				0x800
 #define VM_GUEST_CS_SELECTOR				0x802

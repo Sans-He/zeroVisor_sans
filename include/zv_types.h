@@ -124,7 +124,7 @@ struct zv_vm_control_register
 	u64 ept_ptr;
 	u64 msr_bitmap_addr;
 	u64 vm_entry_ctrl_field;
-	u64 vm_exti_ctrl_field;
+	u64 vm_exit_ctrl_field;
 	u64 virt_apic_page_addr;
 	u64 cr4_guest_host_mask;
 	u64 cr4_read_shadow;

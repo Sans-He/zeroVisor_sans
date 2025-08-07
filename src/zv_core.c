@@ -96,6 +96,12 @@ static void zv_setup_vm_control_register(
     struct zv_vm_control_register* zv_vm_control_register,
     int cpu_id
 );
+static u32 zv_build_ctrl_reg(
+    u64 msr,
+    u32 desired,
+    int cpu_id,
+    const char* tag
+);
 static void zv_vm_set_msr_write_bitmap(
     struct zv_vm_control_register* zv_vm_control_register,
     u64 msr_number
@@ -449,10 +455,23 @@ void zv_hide_range(u64 start_addr, u64 end_addr, int alloc_type) {
     u64 i;
     u64 data;
     u64 phy_addr;
+    u64 start_addr_page;
     u64 align_end_addr;
 
+    start_addr_page = start_addr & MASK_PAGEADDR;
     /* Round up the end address */
     align_end_addr = (end_addr + PAGE_SIZE - 1) & MASK_PAGEADDR;
+
+    /* For edge case : start_addr == end_addr && start_addr just align */
+    if (start_addr_page == align_end_addr) {
+        if (alloc_type == ALLOC_KMALLOC) {
+            phy_addr = virt_to_phys((void*)start_addr_page);
+        } else { // ALLOC_VMALLOC
+            phy_addr = PFN_PHYS(vmalloc_to_pfn((void*)start_addr_page));
+        }
+        zv_set_ept_hide_page(phy_addr);
+        return;
+    }
 
     for (i = (start_addr & MASK_PAGEADDR); i < align_end_addr; i += PAGE_SIZE) {
         data = *((u64*)i);
@@ -471,20 +490,33 @@ void zv_hide_range(u64 start_addr, u64 end_addr, int alloc_type) {
 void zv_lock_range(u64 start_addr, u64 end_addr, int alloc_type) {
     u64 i;
     u64 phy_addr;
+    u64 start_addr_page;
     u64 align_end_addr;
 
-    /* Round up the end address */
+    start_addr_page = start_addr & MASK_PAGEADDR;
+    /* Round up the address */
     align_end_addr = (end_addr + PAGE_SIZE - 1) & MASK_PAGEADDR;
 
-    for (i = (start_addr & MASK_PAGEADDR); i < align_end_addr; i += PAGE_SIZE) {
+    /* For edge case : start_addr == end_addr && start_addr just align */
+    if (start_addr_page == align_end_addr) {
+        if (alloc_type == ALLOC_KMALLOC) {
+            phy_addr = virt_to_phys((void*)start_addr_page);
+        } else { // ALLOC_VMALLOC
+            phy_addr = PFN_PHYS(vmalloc_to_pfn((void*)start_addr_page));
+        }
+        zv_set_ept_lock_page(phy_addr);
+        return;
+    }
+
+    for (i = start_addr_page; i < align_end_addr; i += PAGE_SIZE) {
         if (alloc_type == ALLOC_KMALLOC) {
             phy_addr = virt_to_phys((void*)i);
         } else { // ALLOC_VMALLOC
             phy_addr = PFN_PHYS(vmalloc_to_pfn((void*)i));
         }
-    }
 
-    zv_set_ept_lock_page(phy_addr);
+        zv_set_ept_lock_page(phy_addr);
+    }
 }
 
 /* Protect VMCS structure */
@@ -1165,65 +1197,78 @@ static void zv_setup_vm_control_register(
     struct zv_vm_control_register* zv_vm_control_register,
     int cpu_id
 ) {
-    u64 sec_flags = 0;
+    u32 pin_flags;
+    u32 pri_proc_flags;
+    u32 sec_proc_flags;
+    u32 vm_entry_flags;
+    u32 vm_exit_flags;
+
     zv_log_write(LOG_DETAIL, "Core", "VM [%d] Setup VM Control Register", cpu_id);
 
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_DESC_TABLE;
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_UNREST_GUEST;
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_USE_EPT;
+    pin_flags = 0
+        | VM_BIT_VM_PIN_BASED_USE_PRE_TIMER;
 
-    /* Enable rdtscp instrument */
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_RDTSCP;
-    /* Enable xsaves/xrstors instruments */
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_XSAVES_XRSTORS;
-    
-    if (( zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2) >> 32) 
-        & VM_BIT_VM_SEC_PROC_CTRL_ENABLE_INVPCID) {
-        zv_log_write(LOG_DEBUG, "Core", "VM [%d] Support Enable INVPCID", cpu_id);
-        sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_INVPCID;
-    }
+    zv_vm_control_register->pin_based_ctrl = zv_build_ctrl_reg(
+        zv_rdmsr(MSR_IA32_VMX_TRUE_PINBASED_CTLS),
+        pin_flags,
+        cpu_id,
+        "pin-based-ctrl"
+    );
 
-    if (( zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2) >> 32) 
-        & VM_BIT_VM_SEC_PROC_CTRL_ENABLE_USER_WAIT_PAUSE) {
-        zv_log_write(LOG_DEBUG, "Core", "VM [%d] Support Enable USER_WAIT_PAUSE", cpu_id);
-        /* Enable tpause,umonitor or umwait instruments */
-        sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_USER_WAIT_PAUSE;
-    }
-
-    zv_vm_control_register->pin_based_ctrl = 
-        ( zv_rdmsr(MSR_IA32_VMX_TRUE_PINBASED_CTLS)
-        | VM_BIT_VM_PIN_BASED_USE_PRE_TIMER
-        ) & 0xFFFFFFFF; 
-
-    zv_vm_control_register->pri_proc_based_ctrl = 
-        ( zv_rdmsr(MSR_IA32_VMX_TRUE_PROCBASED_CTLS)
+    pri_proc_flags = 0
         | VM_BIT_VM_PRI_PROC_CTRL_USE_IO_BITMAP
         | VM_BIT_VM_PRI_PROC_CTRL_USE_MSR_BITMAP
         | VM_BIT_VM_PRI_PROC_CTRL_USE_SEC_CTRL
-        | VM_BIT_VM_PRI_PROC_CTRL_USE_MOVE_DR
-        ) & 0xFFFFFFFF;
+        | VM_BIT_VM_PRI_PROC_CTRL_USE_MOVE_DR;
 
-    zv_vm_control_register->sec_proc_based_ctrl =
-		( zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2)
-        | sec_flags
-        ) & 0xFFFFFFFF;
+    zv_vm_control_register->pri_proc_based_ctrl = zv_build_ctrl_reg(
+        zv_rdmsr(MSR_IA32_VMX_TRUE_PROCBASED_CTLS),
+        pri_proc_flags,
+        cpu_id,
+        "pri-proc-based-ctrl"
+    );
 
-	zv_vm_control_register->vm_entry_ctrl_field =
-		( zv_rdmsr(MSR_IA32_VMX_TRUE_ENTRY_CTRLS)
+    sec_proc_flags = 0
+        | VM_BIT_VM_SEC_PROC_CTRL_DESC_TABLE
+        | VM_BIT_VM_SEC_PROC_CTRL_UNREST_GUEST
+        | VM_BIT_VM_SEC_PROC_CTRL_USE_EPT
+        | VM_BIT_VM_SEC_PROC_CTRL_ENABLE_RDTSCP
+        | VM_BIT_VM_SEC_PROC_CTRL_ENABLE_XSAVES_XRSTORS
+        | VM_BIT_VM_SEC_PROC_CTRL_ENABLE_INVPCID
+        | VM_BIT_VM_SEC_PROC_CTRL_ENABLE_USER_WAIT_PAUSE;
+
+    zv_vm_control_register->sec_proc_based_ctrl = zv_build_ctrl_reg(
+		zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2),
+        sec_proc_flags,
+        cpu_id,
+        "sec-proc-based-ctrl"
+    );
+
+    vm_entry_flags = 0
         | VM_BIT_VM_ENTRY_CTRL_IA32E_MODE_GUEST
-        | VM_BIT_VM_ENTRY_LOAD_DEBUG_CTRL
-        ) & 0xFFFFFFFF;
+        | VM_BIT_VM_ENTRY_LOAD_DEBUG_CTRL;
 
-    zv_vm_control_register->vm_exti_ctrl_field = 
-        ( zv_rdmsr(MSR_IA32_VMX_TRUE_EXIT_CTRLS)
+	zv_vm_control_register->vm_entry_ctrl_field = zv_build_ctrl_reg(
+		zv_rdmsr(MSR_IA32_VMX_TRUE_ENTRY_CTRLS),
+        vm_entry_flags,
+        cpu_id,
+        "vm-entry-ctrl"
+    );
+
+    vm_exit_flags = 0
         | VM_BIT_VM_EXIT_CTRL_HOST_ADDR_SIZE
         | VM_BIT_VM_EXIT_SAVE_DEBUG_CTRL
         | VM_BIT_VM_EXIT_CTRL_SAVE_PRE_TIMER
-        | VM_BIT_VM_EXIT_CTRL_SAVE_IA32_EFER
-        ) & 0xFFFFFFFF;
+        | VM_BIT_VM_EXIT_CTRL_SAVE_IA32_EFER;
 
-    /* Hardware_BreakPoint enable : 0x02 unable: 0x00 */
-	zv_vm_control_register->except_bitmap = 0x02;
+    zv_vm_control_register->vm_exit_ctrl_field = zv_build_ctrl_reg(
+        zv_rdmsr(MSR_IA32_VMX_TRUE_EXIT_CTRLS),
+        vm_exit_flags,
+        cpu_id,
+        "vm-exit-ctrl"
+    );
+    
+	zv_vm_control_register->except_bitmap = VM_BIT_EXCEPT_DEBUG;
 
     zv_vm_control_register->io_bitmap_addrA = (u64)(g_io_bitmap_addrA[cpu_id]);
 	zv_vm_control_register->io_bitmap_addrB = (u64)(g_io_bitmap_addrB[cpu_id]);
@@ -1259,6 +1304,35 @@ static void zv_setup_vm_control_register(
 
     zv_vm_control_register->cr4_guest_host_mask = CR4_BIT_VMXE;
     zv_vm_control_register->cr4_read_shadow = CR4_BIT_VMXE;
+}
+
+/* Build control register by MSR-CTL and desired */
+static u32 zv_build_ctrl_reg(
+    u64 msr,
+    u32 desired,
+    int cpu_id,
+    const char* tag
+) {
+    
+    u32 supported;
+    u32 unsupported;
+    u32 bit;
+    u32 allowed_0 = (u32)(msr & 0xFFFFFFFF);
+    u32 allowed_1 = (u32)(msr >> 32);
+
+    /* Filter out the bits supported by the hardware */
+    supported = desired & allowed_1;
+    unsupported = desired & ~allowed_1;
+
+    /* Warning the unsupported bits */
+    while (unsupported) {
+        bit = unsupported & -unsupported;
+        zv_log_write(LOG_NORMAL, "Core", "VM [%d]: Ctrl-reg %s bit 0x%08X not supported", 
+            cpu_id, tag, bit);
+        unsupported &= ~bit;
+    }
+
+    return (supported | allowed_0) & allowed_1;
 }
 
 /* Set MSR write bitmap to get a VM exit event of modification */
@@ -1509,7 +1583,7 @@ static void zv_setup_vmcs(
 		zv_vm_control_register->vm_entry_ctrl_field);
 	zv_print_vm_result("    [*] VM Entry Control", result);
 	result = zv_write_vmcs(VM_CTRL_VM_EXIT_CTRLS,
-		zv_vm_control_register->vm_exti_ctrl_field);
+		zv_vm_control_register->vm_exit_ctrl_field);
 	zv_print_vm_result("    [*] VM Exit Control", result);
 	result = zv_write_vmcs(VM_CTRL_VIRTUAL_APIC_ADDR,
 		zv_vm_control_register->virt_apic_page_addr);
