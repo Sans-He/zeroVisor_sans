@@ -40,13 +40,7 @@
 #define EPT_PAGE_ENT_COUNT		512
 #define EPT_PAGE_SIZE			4096
 
-#ifndef XARRAY
-#define XARRAY
-    extern struct xarray zv_pml4_table;
-    extern struct xarray zv_pdpte_pd_table;
-    extern struct xarray zv_pdept_table;
-    extern struct xarray zv_pte_table;
-#endif // MACRO
+
 
 /*define xarray to store ept page*/
 
@@ -91,7 +85,13 @@ struct zv_ept_pagetable
 
 
 /* VarSiables */
-extern struct zv_ept_info g_ept_info;
+#ifndef XARRAY
+#define XARRAY
+    extern struct xarray zv_pml4_table;
+    extern struct xarray zv_pdpte_pd_table;
+    extern struct xarray zv_pdept_table;
+    extern struct xarray zv_pte_table;
+#endif // MACRO
 
 
 /* The function protocol for walk_system_ram_range. */
@@ -104,12 +104,13 @@ typedef int (*my_walk_system_ram_range) (unsigned long start_pfn, unsigned long 
 u64 zv_get_max_ram_size(void);
 int zv_alloc_ept_pages(void);
 void zv_setup_ept_pagetables(void);
-void* zv_get_pagetable_log_addr(int type, int index);
-void* zv_get_pagetable_phy_addr(int type, int index);
+void* zv_get_pagetable_log_addr(unsigned long type, int index);
+void* zv_get_pagetable_phy_addr(unsigned long type, int index);
 void zv_set_ept_hide_page(u64 phy_addr);
 void zv_set_ept_lock_page(u64 phy_addr);
 void zv_set_ept_all_access_page(u64 phy_addr);
-void zv_protect_ept_pages(void);
+void zv_protect_ept_pages();
+
 /* Change GPA to HPA*/
 void* check_addr_page(u64 x,int type,u64 page_addr,u64 pre_page_addr,u64 offset);
 void zv_add_mem_range(u64 start, u64 end);
