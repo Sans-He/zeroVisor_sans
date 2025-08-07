@@ -1,6 +1,7 @@
 #include <linux/mm.h>
 #include <asm/io.h>
 
+
 #include "../include/zv_mmu.h"
 #include "../include/zv_core.h"
 #include "../include/zv_log.h"
@@ -18,8 +19,15 @@ DEFINE_XARRAY(zv_pte_table);
 /* Static functions declarations */
 static void zv_setup_ept_system_ram_range(void);
 static int zv_callback_set_write_back_to_ram(unsigned long start, unsigned long size, void* arg);
+
+static void zv_set_ept_page(struct zv_ept_info* ept_info_high , int type , u64 start_align);
 static void zv_set_ept_page_flags(u64 phy_addr, u32 flags);
 static void zv_set_ept_page_addr(u64 phy_addr, u64 addr);
+
+/* Static functions related to resource*/
+static void zv_setup_ept_iomem_ram_range(u64 start_addr);
+static struct resource *zv_get_next_resource(struct resource *p, bool sibling_only);
+static int zv_callback_set_ept_to_iomem(struct resource* res,void * arg);
 
 static int zv_callback_walk_ram(unsigned long start, unsigned long size, void* arg) {
     zv_log_write(LOG_DEBUG, "MMU", "System RAM start %016lX, end %016lX, "
@@ -80,6 +88,20 @@ static void zv_setup_ept_system_ram_range(void) {
     func(0, g_max_ram_size / PAGE_SIZE, NULL, zv_callback_set_write_back_to_ram);
 }
 
+/*Set ept for iomem*/
+static void zv_setup_ept_iomem_ram_range(u64 start_addr) {
+
+    my_walk_iomem_ram_range func = NULL;
+
+    func = (my_walk_iomem_ram_range)zv_get_symbol_address("walk_iomem_res_desc");
+    if (! func) {
+        zv_log_write(LOG_NONE, "MMU", "zwalk_iomem_res_desc get fail");
+        return;
+    }
+
+    func(IORES_DESC_NONE , 0 , start_addr , -1ULL , NULL ,zv_callback_set_ept_to_iomem);
+}
+
 /*
  * Process callback of walk_system_ram_range().
  *
@@ -104,7 +126,6 @@ static int zv_callback_set_write_back_to_ram(
     return 0;
 }
 
-/* Protect page table memory for EPT */
 
 
 /*
@@ -176,13 +197,9 @@ u64 guest_to_host(u64 x){
 	
 
 	ept_ptr = (void*)xa_load(&zv_pml4_table,0);
-    //printk(KERN_INFO "ept_ptr:%px offset:%16llX",ept_ptr,PML4E_offset);
 	PDPE_addr = CHANGE_ADDR(ept_ptr->entry[PML4E_offset])
-    //printk(KERN_INFO "PDPE_addr:%px offset:%16llX",PDPE_addr,PDPE_offset);
 	PDE_addr = CHANGE_ADDR(PDPE_addr->entry[PDPE_offset])
-    //printk(KERN_INFO "PDE_addr:%px offset:%16llX",PDE_addr,PDE_offset);
 	PTE_addr = CHANGE_ADDR(PDE_addr->entry[PDE_offset])
-    //printk(KERN_INFO "PTE_addr:%px offset:%16llX",PTE_addr,PTE_offset);
 	phy_addr = (void*)((PTE_addr->entry[PTE_offset])&(~((u64)0xfff)));
 
 
@@ -218,22 +235,20 @@ void * zv_get_pagetable_log_addr(unsigned long type, int index){
             break;
     }
     if(!entry){
-        //printk(KERN_INFO "addr not found in xarray");
         entry = zv_kmalloc(EPT_PAGE_SIZE,GFP_ATOMIC);
+        zv_log_write(LOG_DETAIL,"MMU", "addr not found in xarray , allocate new page:%px",entry);
         result = xa_insert(xa,index,entry,GFP_ATOMIC);
     }
-    //printk("index: %16lx , type: %d , addr: %px",index,type,entry);
     return entry;
 }
 
 
 void * zv_get_pagetable_phy_addr(unsigned long type, int index){
-
     return (void*)virt_to_phys(zv_get_pagetable_log_addr(type,index));
 
 }
 
-void zv_set_ept_high(struct zv_ept_info* ept_info_high , int type , u64 start_align){
+static void zv_set_ept_page(struct zv_ept_info* ept_info_high , int type , u64 start_align){
     struct zv_pagetable* pagetable;
     u64 offset_ept;
     u64 offset_start;
@@ -272,11 +287,9 @@ void zv_set_ept_high(struct zv_ept_info* ept_info_high , int type , u64 start_al
     }
 
     offset_start = (start_align>>offset_ept) & MASK_EPT_OFFSET;
-    //printk(KERN_INFO"ept_level:%d, offset_start:%16llX , ent_count%16llX",type,offset_start,ent_count);
     pagetable = zv_get_pagetable_log_addr(type,index_base);
     for(i = 0;i < ent_count ; i++){
         offset_real = (i + offset_start) % 512;
-        //printk(KERN_INFO"offset_real: %16llX ,ent_count: %16llx",offset_real,ent_count);
         if(offset_real == 0){
             index = (i + offset_start)/512;
             pagetable = zv_get_pagetable_log_addr(type,index + index_base);
@@ -295,7 +308,6 @@ void zv_add_mem_range(u64 start,u64 end){
     u64 start_align =  start & MASK_PAGEADDR;
     u64 end_align = (end + 0xfff) & MASK_PAGEADDR;
     u64 size = (end_align - start_align);
-    printk(KERN_INFO "size:%16llX",size);
     /*calculate entry count*/
     ept_info_high.pml4_ent_count     = CEIL(size , VAL_512GB);
     ept_info_high.pdpte_pd_ent_count = CEIL(size , VAL_1GB);
@@ -306,23 +318,48 @@ void zv_add_mem_range(u64 start,u64 end){
     ept_info_high.pdpte_pd_page_count = CEIL(size , VAL_512GB);
     ept_info_high.pdept_page_count    = CEIL(size , VAL_1GB);
     ept_info_high.pte_page_count      = CEIL(size , VAL_2MB);
-    /*allocate page*/
-    /*
-    ept_info_high.pdpte_pd_page_addr_array = (u64*)zv_vmalloc(ept_info_high.pdpte_pd_page_count * EPT_PAGE_SIZE);
-    ept_info_high.pdept_page_addr_array    = (u64*)zv_vmalloc(ept_info_high.pdept_page_count * EPT_PAGE_SIZE);
-    ept_info_high.pte_page_addr_array      = (u64*)zv_vmalloc(ept_info_high.pte_page_count * EPT_PAGE_SIZE);
-    */
-    /*setup ept*/
-    printk(KERN_INFO "setting pml4 page");
-    zv_set_ept_high(&ept_info_high,EPT_TYPE_PML4,start_align);
-    printk(KERN_INFO "setting PDPTEPD page");
-    zv_set_ept_high(&ept_info_high,EPT_TYPE_PDPTEPD,start_align);
-    printk(KERN_INFO "setting EPT_TYPE_PDEPT page");
-    zv_set_ept_high(&ept_info_high,EPT_TYPE_PDEPT,start_align);
-    printk(KERN_INFO "setting EPT_TYPE_PTE page");
-    zv_set_ept_high(&ept_info_high,EPT_TYPE_PTE,start_align);
-    printk(KERN_INFO "finish setting");
+    /*delete page_array in ept_info so we needn't to alloct space,we now just use it to store basic ept info*/
+    zv_set_ept_page(&ept_info_high,EPT_TYPE_PML4,start_align);
+    zv_set_ept_page(&ept_info_high,EPT_TYPE_PDPTEPD,start_align);
+    zv_set_ept_page(&ept_info_high,EPT_TYPE_PDEPT,start_align);
+    zv_set_ept_page(&ept_info_high,EPT_TYPE_PTE,start_align);
+    /*when start addr = 0 means initial of the moudule,so we initialize iomem*/
     if(start == 0){
         zv_setup_ept_system_ram_range();
+        zv_setup_ept_iomem_ram_range(end_align);
     }
+}
+
+static struct resource *zv_get_next_resource(struct resource *p, bool sibling_only)
+{
+	/* Caller wants to traverse through siblings only */
+	if (sibling_only)
+		return p->sibling;
+	if (p->child)
+		return p->child;
+	while (!p->sibling && p->parent)
+		p = p->parent;
+	return p->sibling;
+}
+
+static int zv_callback_set_ept_to_iomem(struct resource* res,void * arg){
+    struct resource *p;
+    struct resource * (*func)(struct resource * , resource_size_t) = (void*)zv_get_symbol_address("lookup_resource");
+    /*
+        function walk_iomem_res_desc doesn't return a complete resource struct(without child),
+    so we use lookup_resource to get the address.
+    */
+    res = func(&iomem_resource,res->start);
+    p = res;
+    zv_log_write(LOG_DEBUG,"MMU","find resource: %s, start_addr: %16llX end_addr: %16llX child:%p sibling:%p ",
+        res->name,res->start,res->end,res->child,res->sibling);
+    p = zv_get_next_resource(p,0);
+    while(zv_get_next_resource(p,0) != NULL){
+        p = zv_get_next_resource(p,0);
+        if(!(p->child)){
+            zv_add_mem_range(p->start,p->end);
+            zv_log_write(LOG_DEBUG,"MMU","add resource: %s, start_addr: %16llX end_addr: %16llX",p->name,p->start,p->end);
+        }
+    }
+    return 0;
 }

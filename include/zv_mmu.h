@@ -1,6 +1,6 @@
 #include <linux/types.h>
 #include <linux/xarray.h>
-
+#include <linux/resource.h>
 /*
  * Macros.
  */
@@ -63,12 +63,6 @@ struct zv_ept_info {
     u64 pdpte_pd_page_count;
     u64 pdept_page_count;
     u64 pte_page_count;
-
-	/* Page address arrays for each level */
-    u64* pml4_page_addr_array;
-    u64* pdpte_pd_page_addr_array;
-    u64* pdept_page_addr_array;
-    u64* pte_page_addr_array;
 };
 
 /* Page table structure. */
@@ -97,7 +91,8 @@ struct zv_ept_pagetable
 /* The function protocol for walk_system_ram_range. */
 typedef int (*my_walk_system_ram_range) (unsigned long start_pfn, unsigned long nr_pages, 
 	void *arg, int (*func)(unsigned long, unsigned long, void*));
-
+typedef int (*my_walk_iomem_ram_range)  (unsigned long desc, unsigned long flags, u64 start, 
+    u64 end, void * arg, int (*func) (struct resource *, void *));
 
 
 /* Function declarations */
@@ -109,10 +104,12 @@ void* zv_get_pagetable_phy_addr(unsigned long type, int index);
 void zv_set_ept_hide_page(u64 phy_addr);
 void zv_set_ept_lock_page(u64 phy_addr);
 void zv_set_ept_all_access_page(u64 phy_addr);
-void zv_protect_ept_pages();
+void zv_protect_ept_pages(void);
 
-/* Change GPA to HPA*/
+/* Change GPA to HPA with EPT*/
 void* check_addr_page(u64 x,int type,u64 page_addr,u64 pre_page_addr,u64 offset);
+
+/* Function to add mem range to ept*/
 void zv_add_mem_range(u64 start, u64 end);
 
 u64 guest_to_host(u64 x);

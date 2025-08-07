@@ -108,17 +108,6 @@ static void zv_setup_vmcs(
 static void zv_print_vm_result(const char* string, int result);
 static void zv_dup_page_table_for_host(void);
 
-static void func_test(u64 start,u64 end){
-    u64 i = 0x00000;
-    for( i = start ; i <= end ; i+=EPT_PAGE_SIZE){
-        if(guest_to_host(i) != i){
-            printk(KERN_INFO "function wrong , wrong addr : %16llX , addr should be%16llX", guest_to_host(i) , i);
-        }else if( i%100 == 0){
-            printk(KERN_INFO "function working smoothly , addr_now : %16llX", i);
-        }
-    }
-} 
-
 /* support for ZEROVISOR_USE_SHUTDOWN*/
 #if ZEROVISOR_USE_SHUTDOWN
 /* Variables*/
