@@ -6,8 +6,11 @@
 
 /* Functional macros
  * 
- * ZEROVISOR_USE_SHUTDOWN: For support safe shut-down. 
- * 
+ * ZEROVISOR_USE_SHUTDOWN: For support safe shut-down.
+ * 		However, for performance reasons, it is necessary to support not 
+ * 		enabling this feature, so macro Settings are used. 
+ * ZEROVISOR_LOG_TO_KMSG: For the convenience of debugging, 
+ * 		output the Log content to Kmsg simultaneously
  * 
  * 
  */
@@ -480,3 +483,7 @@
 #define GDT_TYPE_64BIT_CALL_GATE				12
 #define GDT_TYPE_64BIT_INTERRUPT_GATE			14
 #define GDT_TYPE_64BIT_TRAP_GATE				15
+
+/* Define VM call service number */
+#define VM_SERVICE_SHUTDOWN						0
+#define VM_SERVICE_SHUTDOWN_THIS_CORE			1

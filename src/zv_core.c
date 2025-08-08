@@ -9,6 +9,7 @@
 #include <linux/delay.h>
 #include <linux/irqflags.h>
 #include <linux/kthread.h>
+#include <linux/reboot.h>
 
 #include <asm/io.h>
 #include <asm/desc.h>
@@ -115,15 +116,24 @@ static void zv_print_vm_result(const char* string, int result);
 static void zv_dup_page_table_for_host(void);
 
 /* support for ZEROVISOR_USE_SHUTDOWN*/
-#if ZEROVISOR_USE_SHUTDOWN
+#ifdef ZEROVISOR_USE_SHUTDOWN
 /* Variables*/
-// static struct notifier_block* g_reboot_nb_ptr = NULL;
-// static struct notifier_block g_reboot_nb = {
-//     .notifier_call = 
-// }
+struct task_struct *g_vm_shutdown_thread_id[MAX_PROCESSOR_COUNT]= {NULL, };
+struct zv_share_context* g_share_context = NULL;
+static struct notifier_block* g_shutdown_nb_ptr = NULL;
 
 /* Functions*/
+static int zv_system_shutdown_notify(
+    struct notifier_block *nb,
+    unsigned long code,
+    void* unused
+);
+static int zv_vm_thread_shutdown(void* arg);
 
+/* callback struct */
+static struct notifier_block g_shutdown_nb = {
+    .notifier_call = zv_system_shutdown_notify,
+};
 
 #endif
 
@@ -168,9 +178,16 @@ static int __init zeroVisor_init(void) {
         return 0;
     }
 
-#if ZEROVISOR_USE_SHUTDOWN
+#ifdef ZEROVISOR_USE_SHUTDOWN
     /* Add callback funtion for checking system shutdown*/
-    // TODO
+    g_shutdown_nb_ptr = zv_kmalloc(sizeof(struct notifier_block), GFP_KERNEL);
+    memcpy(g_shutdown_nb_ptr, &g_shutdown_nb, sizeof(struct notifier_block));
+    register_reboot_notifier(g_shutdown_nb_ptr);
+
+    /* Create shared context for system shutdown */
+    g_share_context = (struct zv_share_context*)zv_kmalloc(sizeof(struct zv_share_context), GFP_KERNEL);
+    atomic_set(&(g_share_context->shutdown_complete_count), 0);
+    atomic_set(&(g_share_context->shutdown_flag), 0);
 #endif
 
     /* 
@@ -223,13 +240,26 @@ static int __init zeroVisor_init(void) {
     /* Create thread for each core */
     for (i = 0; i < cpu_count; i ++) {
         g_vm_start_thread_id[i] = (struct task_struct*)kthread_create_on_node(
-            zv_vm_thread_start, NULL, cpu_to_node(i), "vm_thread");
+            zv_vm_thread_start, NULL, cpu_to_node(i), "vm_thread"
+        );
 
         if (g_vm_start_thread_id[i]) {
             kthread_bind(g_vm_start_thread_id[i], i);
         } else {
-            zv_log_write(LOG_NORMAL, "Core", "VMX [%d] Thread Run Fail", i);
+            zv_log_write(LOG_NORMAL, "Core", "VMX [%d] Start Thread Run Fail", i);
         }
+
+#ifdef ZEROVISOR_USE_SHUTDOWN
+        g_vm_shutdown_thread_id[i] = (struct task_struct *)kthread_create_on_node(
+            zv_vm_thread_shutdown, NULL, cpu_to_node(i), "vm_thread"
+        );
+
+        if (g_vm_shutdown_thread_id[i]) {
+            kthread_bind(g_vm_shutdown_thread_id[i], i);
+        } else {
+            zv_log_write(LOG_NORMAL, "Core", "VMX [%d] Shutdown Thread Run Fail", i);
+        }
+#endif
     }
 
     /* Duplicate page table for the host and zeroVisor */
@@ -246,6 +276,10 @@ static int __init zeroVisor_init(void) {
             wake_up_process(g_vm_start_thread_id[i]);
             zv_log_write(LOG_DEBUG, "Core", "VMX [%d] Thread Run Success", i);
         }
+
+#ifdef ZEROVISOR_USE_SHUTDOWN
+        wake_up_process(g_vm_shutdown_thread_id[i]);
+#endif
     }
 
     /* Execute thread for this core */
@@ -1800,6 +1834,48 @@ static void zv_dup_page_table_for_host(void) {
 		}
 	}
 }
+
+/* Process system shutdown(reboot) notify event */
+static int zv_system_shutdown_notify(
+    struct notifier_block *nb,
+    unsigned long code,
+    void* unused
+) {
+    int cpu_count;
+
+    /* Call shut-down function */
+    zv_vm_call(VM_SERVICE_SHUTDOWN, NULL);
+
+    cpu_count = num_online_cpus();
+    zv_log_write(LOG_NONE, "Core", "Shutdown start - cpu count %d", cpu_count);
+
+    while (true) {
+        if (atomic_read(&(g_share_context->shutdown_complete_count)) == cpu_count) {
+            break;
+        }
+
+        ssleep(1);
+    }
+
+    return NOTIFY_DONE;
+}
+
+/* Disable VT-x & zeroVisor on each core */
+static int zv_vm_thread_shutdown(void* arg) {
+    int cpu_id = smp_processor_id();
+
+    while (atomic_read(&(g_share_context->shutdown_flag)) == 0) {
+        ssleep(1);
+    }
+
+    zv_vm_call(VM_SERVICE_SHUTDOWN_THIS_CORE, NULL);
+
+    zv_log_write(LOG_DEBUG, "Core", "VM [%d] Shutdown compelete !", cpu_id);
+
+    atomic_inc(&(g_share_context->shutdown_complete_count));
+    return 0;
+}
+
 
 module_init(zeroVisor_init);
 module_exit(zeroVisor_exit);

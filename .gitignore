@@ -12,3 +12,4 @@
 .tmp_versions/
 .deps/
 .depend/
+/src/system.map/

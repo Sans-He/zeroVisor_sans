@@ -78,8 +78,24 @@ static void zv_vm_exit_callback_ept_violation(
     u64 guest_linear,
     u64 guest_physical
 );
-
 static void zv_vm_exit_callback_pre_timer_expired(int cpu_id);
+static void zv_vm_exit_callback_vmcall(
+    int cpu_id,
+    struct zv_vm_exit_guest_register* guest_context
+);
+static void zv_shutdown_vm_this_core(
+    int cpu_id,
+    struct zv_vm_exit_guest_register* guest_context
+);
+static void zv_fill_context_from_vm_guest(
+    struct zv_vm_exit_guest_register* guest_context,
+    struct zv_vm_full_context* full_context
+);
+static void zv_restore_context_from_vm_guest(
+    int cpu_id,
+    struct zv_vm_full_context* full_context,
+    u64 guest_rsp
+);
 
 /* Process vm_exit event */
 void zv_vm_exit_callback(struct zv_vm_exit_guest_register* guest_context) {
@@ -166,7 +182,7 @@ void zv_vm_exit_callback(struct zv_vm_exit_guest_register* guest_context) {
             break;
 
         case VM_EXIT_REASON_VMCALL:
-            // TODO()
+            zv_vm_exit_callback_vmcall(cpu_id, guest_context);
             break;
 
         case VM_EXIT_REASON_VMCLEAR:
@@ -975,4 +991,97 @@ void zv_vm_resume_fail_callback(u64 error) {
 
     zv_log_write(LOG_NONE, "VMExit", "VM RESUME FAIL %d !", error);
     zv_log_error(ERROR_LAUNCH_FAIL);
+}
+
+/* Process VM call */
+static void zv_vm_exit_callback_vmcall(
+    int cpu_id,
+    struct zv_vm_exit_guest_register* guest_context
+) {
+    u64 service_id;
+    void* arg;
+
+    service_id = guest_context->rax;
+    arg = (void*)guest_context->rbx;
+
+    zv_log_write(LOG_DEBUG, "VMExit", "VM [%d] VMCALL index[%ld]", cpu_id, service_id);
+    /* Move RIP to next instruction */
+    zv_advance_vm_guest_rip();
+
+    switch (service_id) {
+#ifdef ZEROVISOR_USE_SHUTDOWN
+        case VM_SERVICE_SHUTDOWN:
+            atomic_set(&(g_share_context->shutdown_flag), 1);
+            break;
+        case VM_SERVICE_SHUTDOWN_THIS_CORE:
+            zv_shutdown_vm_this_core(cpu_id, guest_context);
+            break;
+#endif
+
+        default:
+            zv_advance_vm_guest_rip();
+            break;
+    }
+}
+
+/* Shutdown zeroVisor */
+static void zv_shutdown_vm_this_core(
+    int cpu_id,
+    struct zv_vm_exit_guest_register* guest_context
+) {
+    struct zv_vm_full_context full_context;
+	u64 guest_VMCS_log_addr;
+	u64 guest_VMCS_phy_addr;
+	u64 guest_rsp;
+
+    // zv_log_write(LOG_DEBUG, "Core", "VM [%d] zv_shutdown_vm_this_core is called", cpu_id);
+
+    zv_read_vmcs(VM_GUEST_RSP, &guest_rsp);
+    zv_fill_context_from_vm_guest(guest_context, &full_context);
+
+    guest_VMCS_log_addr = (u64)(g_guest_vmcs_log_addr[cpu_id]);
+	guest_VMCS_phy_addr = (u64)virt_to_phys((void*)guest_VMCS_log_addr);
+
+    zv_clear_vmcs(&guest_VMCS_phy_addr);
+    zv_stop_vmx();
+
+    zv_restore_context_from_vm_guest(cpu_id, &full_context, guest_rsp);
+}
+
+/* Fill guest context from the guest VMCS */
+static void zv_fill_context_from_vm_guest(
+    struct zv_vm_exit_guest_register* guest_context,
+    struct zv_vm_full_context* full_context
+) {
+	memcpy(&(full_context->gp_register), guest_context, sizeof(struct zv_vm_exit_guest_register));
+
+	zv_read_vmcs(VM_GUEST_CS_SELECTOR, &(full_context->cs_selector));
+	zv_read_vmcs(VM_GUEST_DS_SELECTOR, &(full_context->ds_selector));
+	zv_read_vmcs(VM_GUEST_ES_SELECTOR, &(full_context->es_selector));
+	zv_read_vmcs(VM_GUEST_FS_SELECTOR, &(full_context->fs_selector));
+	zv_read_vmcs(VM_GUEST_GS_SELECTOR, &(full_context->gs_selector));
+
+	zv_read_vmcs(VM_GUEST_LDTR_SELECTOR, &(full_context->ldtr_selector));
+	zv_read_vmcs(VM_GUEST_TR_SELECTOR, &(full_context->tr_selector));
+
+	zv_read_vmcs(VM_GUEST_CR0, &(full_context->cr0));
+	zv_read_vmcs(VM_GUEST_CR3, &(full_context->cr3));
+	zv_read_vmcs(VM_GUEST_CR4, &(full_context->cr4));
+	zv_read_vmcs(VM_GUEST_RIP, &(full_context->rip));
+	zv_read_vmcs(VM_GUEST_RFLAGS, &(full_context->rflags));
+}
+
+/* Restore the guest VMCS from the full context */
+static void zv_restore_context_from_vm_guest(
+    int cpu_id,
+    struct zv_vm_full_context* full_context,
+    u64 guest_rsp
+) {
+    u64 target_addr;
+
+    /* Copy context to stack and restore */
+	target_addr = guest_rsp - sizeof(struct zv_vm_full_context);
+	memcpy((void*)target_addr, full_context, sizeof(struct zv_vm_full_context));
+
+	zv_restore_context_from_stack(target_addr);
 }
