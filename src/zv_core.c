@@ -187,15 +187,11 @@ static int __init zeroVisor_init(void) {
 
     /* Allcate the required memory */
     zv_alloc_vmcs_memory();
-
-    if (zv_alloc_ept_pages() != 0) {
-        zv_log_error(ERROR_MEMORY_ALLOC_FAIL);
-        goto ERROR_HANDLE;
-    }
-    zv_setup_ept_pagetables();
-
+    zv_add_mem_range(0,g_max_ram_size);
+    
     /* Protect the memory */
     zv_protect_ept_pages();
+    /*new func to protect ept*/
     zv_protect_vmcs();
 
     /* Setup Memory for zeroVisor
@@ -1279,7 +1275,7 @@ static void zv_setup_vm_control_register(
 		(u64)virt_to_phys((void*)zv_vm_control_register->virt_apic_page_addr);
     
     zv_vm_control_register->ept_ptr =
-		(u64)virt_to_phys((void*)g_ept_info.pml4_page_addr_array[0])
+		(u64)virt_to_phys((void*)zv_get_pagetable_log_addr(EPT_TYPE_PML4,0))
         | VM_BIT_EPT_PAGE_WALK_LENGTH_BITMAP
         | VM_BIT_EPT_MEM_TYPE_WB;
 
