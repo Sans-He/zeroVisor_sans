@@ -6,6 +6,7 @@
 
 #include <linux/smp.h>
 #include <linux/io.h>
+#include <asm/desc.h>
 
 #include <../include/zv_config.h>
 #include <../include/zv_types.h>
@@ -1044,6 +1045,16 @@ static void zv_shutdown_vm_this_core(
 
     zv_clear_vmcs(&guest_VMCS_phy_addr);
     zv_stop_vmx();
+
+    /* Restore original GDTR/IDTR using kernel APIs */
+    zv_log_write(LOG_DEBUG, "Core", "VM [%d] Restoring original GDTR/IDTR", cpu_id);
+    zv_log_write(LOG_DEBUG, "Core", "VM [%d] Original GDTR: %016lX, Size: %d", 
+        cpu_id, g_gdtr_array[cpu_id].address, g_gdtr_array[cpu_id].size);
+    zv_log_write(LOG_DEBUG, "Core", "VM [%d] Original IDTR: %016lX, Size: %d", 
+        cpu_id, g_idtr_array[cpu_id].address, g_idtr_array[cpu_id].size);
+    
+    load_gdt(&g_gdtr_array[cpu_id]);
+    load_idt(&g_idtr_array[cpu_id]);
 
     zv_restore_context_from_vm_guest(cpu_id, &full_context, guest_rsp);
 }

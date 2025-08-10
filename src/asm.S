@@ -455,22 +455,22 @@ zv_restore_context_from_stack:
     movq %rdi, %rsp
 
     popq %rax         # cr4
-    #movq %rax, %cr4
+    #movq %rax, %cr4  # Keep commented - dangerous to restore
 
     popq %rax         # cr3
     movq %rax, %cr3
 
     popq %rax         # cr0
-    #movq %rax, %cr0
+    #movq %rax, %cr0  # Keep commented - dangerous to restore
 
     popq %rax         # tr
-    #ltr %ax
+    #ltr %ax          # Keep commented - can cause issues
 
-    popq %rax         # lldt
-    #lldt %ax
+    popq %rax         # lldt  
+    #lldt %ax         # Keep commented - can cause issues
 
     popq %rax         # gs
-    #movw %ax, %gs
+    #movw %ax, %gs    # Keep commented - can cause issues
 
     popq %rax         # fs
     movw %ax, %fs

@@ -54,6 +54,7 @@ atomic_t g_thread_complete_cnt;
 
 // Some variables used for restoring the scene
 struct desc_ptr g_gdtr_array[MAX_PROCESSOR_COUNT];
+struct desc_ptr g_idtr_array[MAX_PROCESSOR_COUNT];
 
 // Page Table related variables
 u64 g_vm_host_phy_pml4 = 0;
@@ -129,6 +130,7 @@ static int zv_system_shutdown_notify(
     void* unused
 );
 static int zv_vm_thread_shutdown(void* arg);
+static void zv_do_shutdown(void);
 
 /* callback struct */
 static struct notifier_block g_shutdown_nb = {
@@ -306,6 +308,12 @@ ERROR_HANDLE:
 }
 
 static void __exit zeroVisor_exit(void) {
+    /* unregister reboot (shutdown) notifier */
+    unregister_reboot_notifier(g_shutdown_nb_ptr);
+
+    /* Do shut-down (vmx off) */
+    zv_do_shutdown();
+
     /* Free all the allocated memory block */
     zv_free_all();
 
@@ -853,18 +861,17 @@ static int zv_init_vmx(int cpu_id) {
 
 /* Protect GDT and IDT */
 static void zv_protect_gdt(int cpu_id) {
-    struct desc_ptr idtr;
 
     native_store_gdt(&g_gdtr_array[cpu_id]);
-    store_idt(&idtr); // some native_* functions erase in 5.X + kernel
+    store_idt(&g_idtr_array[cpu_id]); // 保存到全局数组中
 
     zv_log_write(LOG_DEBUG, "Core", "VM [%d] Protect GDT IDT", cpu_id);
     zv_log_write(LOG_DEBUG, "Core", "VM [%d]    [*] GDTR Base %16lX, Size %d",
         cpu_id, g_gdtr_array[cpu_id].address, g_gdtr_array[cpu_id].size);
     zv_log_write(LOG_DEBUG, "Core", "VM [%d]    [*] IDTR Base %16lX, Size %d",
-        cpu_id, idtr.address, idtr.size);
+        cpu_id, g_idtr_array[cpu_id].address, g_idtr_array[cpu_id].size);
 
-    zv_lock_range(idtr.address, (idtr.address + 0xFFF) & MASK_PAGEADDR, ALLOC_VMALLOC);
+    zv_lock_range(g_idtr_array[cpu_id].address, (g_idtr_array[cpu_id].address + 0xFFF) & MASK_PAGEADDR, ALLOC_VMALLOC);
 }
 
 /* Setup the host registers */
@@ -1841,23 +1848,20 @@ static int zv_system_shutdown_notify(
     unsigned long code,
     void* unused
 ) {
-    int cpu_count;
+    zv_do_shutdown();
+    return NOTIFY_DONE;
+}
+
+/* Call shut-down function */
+static void zv_do_shutdown(void) {
+    int cpu_count = num_online_cpus();
 
     /* Call shut-down function */
     zv_vm_call(VM_SERVICE_SHUTDOWN, NULL);
 
-    cpu_count = num_online_cpus();
     zv_log_write(LOG_NONE, "Core", "Shutdown start - cpu count %d", cpu_count);
 
-    while (true) {
-        if (atomic_read(&(g_share_context->shutdown_complete_count)) == cpu_count) {
-            break;
-        }
-
-        ssleep(1);
-    }
-
-    return NOTIFY_DONE;
+    while (atomic_read(&(g_share_context->shutdown_complete_count)) < cpu_count) ssleep(1);
 }
 
 /* Disable VT-x & zeroVisor on each core */

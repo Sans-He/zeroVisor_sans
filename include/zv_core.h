@@ -3,6 +3,7 @@
 /* Variables */
 extern u64 g_max_ram_size;
 extern struct desc_ptr g_gdtr_array[];
+extern struct desc_ptr g_idtr_array[];
 extern struct zv_share_context* g_share_context;
 extern void* g_guest_vmcs_log_addr[];
 
