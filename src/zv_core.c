@@ -1243,6 +1243,7 @@ static void zv_setup_vm_control_register(
     u32 sec_proc_flags;
     u32 vm_entry_flags;
     u32 vm_exit_flags;
+    u32 exception_bitmap_flags;
 
     zv_log_write(LOG_DETAIL, "Core", "VM [%d] Setup VM Control Register", cpu_id);
 
@@ -1308,8 +1309,12 @@ static void zv_setup_vm_control_register(
         cpu_id,
         "vm-exit-ctrl"
     );
+
+    exception_bitmap_flags = 0
+        | VM_BIT_EXCEPT_DEBUG 
+        | VM_BIT_EXCEPT_BREAKPOINT;
     
-	zv_vm_control_register->except_bitmap = VM_BIT_EXCEPT_DEBUG;
+	zv_vm_control_register->except_bitmap = exception_bitmap_flags;
 
     zv_vm_control_register->io_bitmap_addrA = (u64)(g_io_bitmap_addrA[cpu_id]);
 	zv_vm_control_register->io_bitmap_addrB = (u64)(g_io_bitmap_addrB[cpu_id]);
