@@ -1,6 +1,7 @@
 #include <linux/mm.h>
 #include <asm/io.h>
 
+
 #include "../include/zv_mmu.h"
 #include "../include/zv_core.h"
 #include "../include/zv_log.h"
@@ -9,13 +10,24 @@
 
 /* Variables */
 static u64 g_ram_end;
-struct zv_ept_info g_ept_info = {0, };
+
+DEFINE_XARRAY(zv_pml4_table);
+DEFINE_XARRAY(zv_pdpte_pd_table);
+DEFINE_XARRAY(zv_pdept_table);
+DEFINE_XARRAY(zv_pte_table);
 
 /* Static functions declarations */
 static void zv_setup_ept_system_ram_range(void);
 static int zv_callback_set_write_back_to_ram(unsigned long start, unsigned long size, void* arg);
+
+static void zv_set_ept_page(struct zv_ept_info* ept_info_high , int type , u64 start_align);
 static void zv_set_ept_page_flags(u64 phy_addr, u32 flags);
 static void zv_set_ept_page_addr(u64 phy_addr, u64 addr);
+
+/* Static functions related to resource*/
+static void zv_setup_ept_iomem_ram_range(u64 start_addr);
+static struct resource *zv_get_next_resource(struct resource *p, bool sibling_only);
+static int zv_callback_set_ept_to_iomem(struct resource* res,void * arg);
 
 static int zv_callback_walk_ram(unsigned long start, unsigned long size, void* arg) {
     zv_log_write(LOG_DEBUG, "MMU", "System RAM start %016lX, end %016lX, "
@@ -59,250 +71,8 @@ u64 zv_get_max_ram_size(void) {
     return g_ram_end;
 }
 
-int zv_alloc_ept_pages(void) {
-    int i;
-
-    g_ept_info.pml4_ent_count = CEIL(g_max_ram_size, VAL_512GB);
-    g_ept_info.pdpte_pd_ent_count = CEIL(g_max_ram_size, VAL_1GB);
-    g_ept_info.pdept_ent_count = CEIL(g_max_ram_size, VAL_2MB);
-	g_ept_info.pte_ent_count = CEIL(g_max_ram_size, VAL_4KB);
-
-    g_ept_info.pml4_page_count = CEIL(g_ept_info.pml4_ent_count, EPT_PAGE_ENT_COUNT);
-	g_ept_info.pdpte_pd_page_count = CEIL(g_ept_info.pdpte_pd_ent_count, EPT_PAGE_ENT_COUNT);
-	g_ept_info.pdept_page_count = CEIL(g_ept_info.pdept_ent_count, EPT_PAGE_ENT_COUNT);
-	g_ept_info.pte_page_count = CEIL(g_ept_info.pte_ent_count, EPT_PAGE_ENT_COUNT);
-
-    zv_log_write(LOG_DEBUG, "MMU", "Setup EPT, Max RAM Size %ld", g_max_ram_size);
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] EPT Size: %d", 
-        (int)sizeof(struct zv_ept_pagetable));
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] PML4 Entry Count: %d", 
-        (int)g_ept_info.pml4_ent_count);
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] PDPTE PD Entry Count: %d", 
-        (int)g_ept_info.pdpte_pd_ent_count);
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] PDE PT Entry Count: %d", 
-        (int)g_ept_info.pdept_ent_count);
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] PTE Entry Count: %d", 
-        (int)g_ept_info.pte_ent_count);
-
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] PML4 Page Count: %d", 
-        (int)g_ept_info.pml4_page_count);
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] PDPTE PD Page Count: %d", 
-        (int)g_ept_info.pdpte_pd_page_count);
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] PDE PT Page Count: %d", 
-        (int)g_ept_info.pdept_page_count);
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] PTE Page Count: %d", 
-        (int)g_ept_info.pte_page_count);
-
-    /* Allocate memory for page table */
-    g_ept_info.pml4_page_addr_array = (u64*)zv_vmalloc(g_ept_info.pml4_page_count * sizeof(u64*));
-    g_ept_info.pdpte_pd_page_addr_array = (u64*)zv_vmalloc(g_ept_info.pdpte_pd_page_count * sizeof(u64*));
-    g_ept_info.pdept_page_addr_array = (u64*)zv_vmalloc(g_ept_info.pdept_page_count * sizeof(u64*));
-    g_ept_info.pte_page_addr_array = (u64*)zv_vmalloc(g_ept_info.pte_page_count * sizeof(u64*));
-
-    if (   (! g_ept_info.pml4_page_addr_array)
-        || (! g_ept_info.pdpte_pd_page_addr_array)
-        || (! g_ept_info.pdept_page_addr_array)
-        || (! g_ept_info.pte_page_addr_array)
-    ) {
-        zv_log_write(LOG_NONE, "MMU", "zv_alloc_ept_pages alloc fail");
-		return -1;
-	}
-
-    for (i = 0; i < g_ept_info.pml4_page_count; i ++) {
-        g_ept_info.pml4_page_addr_array[i] = (u64)zv_kmalloc(0x1000, GFP_KERNEL);
-        
-        if (! g_ept_info.pml4_page_addr_array[i]) {
-            zv_log_write(LOG_NONE, "MMU", "zv_alloc_ept_pages alloc fail");
-            return -1;
-        }
-    }
-
-    for (i = 0; i < g_ept_info.pdpte_pd_page_count; i ++) {
-        g_ept_info.pdpte_pd_page_addr_array[i] = (u64)zv_kmalloc(0x1000, GFP_KERNEL);
-
-        if (! g_ept_info.pdpte_pd_page_addr_array[i]) {
-            zv_log_write(LOG_NONE, "MMU", "zv_alloc_ept_pages alloc fail");
-            return -1;
-        }
-    }
-
-    for (i = 0; i < g_ept_info.pdept_page_count; i ++) {
-        g_ept_info.pdept_page_addr_array[i] = (u64)zv_kmalloc(0x1000, GFP_KERNEL);
-        
-        if (! g_ept_info.pdept_page_addr_array[i]) {
-            zv_log_write(LOG_NONE, "MMU", "zv_alloc_ept_pages alloc fail");
-            return -1;
-        }
-    }
-    
-    for (i = 0; i < g_ept_info.pte_page_count; i ++) {
-        g_ept_info.pte_page_addr_array[i] = (u64)zv_kmalloc(0x1000, GFP_KERNEL);
-        
-        if (! g_ept_info.pte_page_addr_array[i]) {
-            zv_log_write(LOG_NONE, "MMU", "zv_alloc_ept_pages alloc fail");
-            return -1;
-        }
-    }
-
-    zv_log_write(LOG_DETAIL, "MMU", "   [*] Page Table Memory Allocate Success");
-
-    return 0;
-}
-
-/* Setup EPT */
-void zv_setup_ept_pagetables(void) {
-    struct zv_ept_pagetable* ept_info;
-    u64 next_page_table_addr;
-    u64 i, j;
-    u64 loop_cnt;
-    u64 base_addr;
-
-    /* Setup PML4 */
-    zv_log_write(LOG_DETAIL, "MMU", "Setup PML4");
-    ept_info = (struct zv_ept_pagetable*)zv_get_pagetable_log_addr(EPT_TYPE_PML4, 0);
-    zv_log_write(LOG_DETAIL, "MMU", "   [*] Setup PML4 %016lX", (u64)ept_info);
-    memset(ept_info, 0, sizeof(struct zv_ept_pagetable));
-
-    base_addr = 0;
-    for (i = 0; i < EPT_PAGE_ENT_COUNT; i ++) {
-        if (i < g_ept_info.pml4_ent_count) {
-            next_page_table_addr = (u64)zv_get_pagetable_phy_addr(EPT_TYPE_PDPTEPD, i);
-            ept_info->entry[i] = next_page_table_addr | EPT_ALL_ACCESS;
-
-            if (i == 0) {
-                zv_log_write(LOG_DETAIL, "MMU", "   [*] %016lX", (u64)next_page_table_addr);
-            }
-        } else {
-            ept_info->entry[i] = base_addr | EPT_ALL_ACCESS;
-        }
-
-        base_addr += VAL_512GB;
-    }
-
-    /* Setup PDPTE PD */
-    zv_log_write(LOG_DETAIL, "MMU", "Setup PDPTE PD");
-    base_addr = 0;
-    for (j = 0; j < g_ept_info.pdpte_pd_page_count; j ++) {
-        ept_info = (struct zv_ept_pagetable*)zv_get_pagetable_log_addr(EPT_TYPE_PDPTEPD, j);
-        zv_log_write(LOG_DETAIL, "MMU", "   [*] Setup PDPTEPD [%d] %016lX", j, (u64)ept_info);
-        memset(ept_info, 0, sizeof(struct zv_ept_pagetable));
-
-        loop_cnt = g_ept_info.pdpte_pd_ent_count - (j * EPT_PAGE_ENT_COUNT);
-        loop_cnt = loop_cnt > EPT_PAGE_ENT_COUNT ? EPT_PAGE_ENT_COUNT : loop_cnt;
-
-        for (i = 0; i < EPT_PAGE_ENT_COUNT; i ++) {
-            if (i < loop_cnt) {
-                next_page_table_addr = (u64)zv_get_pagetable_phy_addr(EPT_TYPE_PDEPT,
-                    (j * EPT_PAGE_ENT_COUNT) + i);
-                ept_info->entry[i] = next_page_table_addr | EPT_ALL_ACCESS;
-
-                if (i == 0) {
-                    zv_log_write(LOG_DETAIL, "MMU", "   [*] %016lX", (u64)next_page_table_addr);
-                }
-            } else {
-                ept_info->entry[i] = base_addr | EPT_ALL_ACCESS;
-            }
-
-            base_addr += VAL_1GB;
-        }
-    }
-
-    /* Setup PDEPT */
-    zv_log_write(LOG_DETAIL, "MMU", "Setup PDEPT");
-    base_addr = 0;
-    for (j = 0; j < g_ept_info.pdept_page_count; j ++) {
-        ept_info = (struct zv_ept_pagetable*)zv_get_pagetable_log_addr(EPT_TYPE_PDEPT, j);
-        zv_log_write(LOG_DETAIL, "MMU", "   [*] Setup PDEPT [%d] %016lX", j, (u64)ept_info);
-        memset(ept_info, 0, sizeof(struct zv_ept_pagetable));
-
-        loop_cnt = g_ept_info.pdept_ent_count - (j * EPT_PAGE_ENT_COUNT);
-        loop_cnt = loop_cnt > EPT_PAGE_ENT_COUNT ? EPT_PAGE_ENT_COUNT : loop_cnt;
-
-
-        for (i = 0; i < EPT_PAGE_ENT_COUNT; i ++) {
-            if (i < loop_cnt) {
-                next_page_table_addr = (u64)zv_get_pagetable_phy_addr(EPT_TYPE_PTE, 
-                    (j * EPT_PAGE_ENT_COUNT) + i);
-                ept_info->entry[i] = next_page_table_addr | EPT_ALL_ACCESS;
-
-                if (i == 0) {
-                    zv_log_write(LOG_DETAIL, "MMU", "   [*] %016lX", (u64)next_page_table_addr);
-                }
-            } else {
-                ept_info->entry[i] = base_addr | EPT_ALL_ACCESS;
-            }
-
-            base_addr += VAL_2MB;
-        }
-    }
-
-    /* Setup PTE */
-    zv_log_write(LOG_DETAIL, "MMU", "Setup PTE");
-    for (j = 0; j < g_ept_info.pte_page_count; j ++) {
-        ept_info = (struct zv_ept_pagetable*)zv_get_pagetable_log_addr(EPT_TYPE_PTE, j);
-        memset(ept_info, 0, sizeof(struct zv_ept_pagetable));
-
-        loop_cnt = g_ept_info.pte_ent_count - (j * EPT_PAGE_ENT_COUNT);
-        loop_cnt = loop_cnt > EPT_PAGE_ENT_COUNT ? EPT_PAGE_ENT_COUNT : loop_cnt;
-
-
-        for (i = 0; i < EPT_PAGE_ENT_COUNT; i ++) {
-            if (i < loop_cnt) {
-                next_page_table_addr = ((u64)j * EPT_PAGE_ENT_COUNT + i) * EPT_PAGE_SIZE;
-
-                /*
-				 * Set uncacheable type by default.
-				 * Set write-back type to "System RAM" areas at the end of this
-				 * function.
-				 */
-				ept_info->entry[i] = next_page_table_addr | EPT_ALL_ACCESS;
-            } else {
-                ept_info->entry[i] = base_addr | EPT_ALL_ACCESS;
-            }
-
-            base_addr += VAL_4KB;
-        }
-    }
-
-    /* Set write-back type to "System RAM" areas */
-    zv_setup_ept_system_ram_range();
-}
-
-/* Get logical address of page table pointer of index and type */
-void* zv_get_pagetable_log_addr(int type, int index) {
-    u64* table_array_addr;
-    
-    switch (type) {
-        case EPT_TYPE_PML4: 
-            table_array_addr = g_ept_info.pml4_page_addr_array;
-            break;
-        
-        case EPT_TYPE_PDPTEPD:
-            table_array_addr = g_ept_info.pdpte_pd_page_addr_array;
-            break;
-        
-        case EPT_TYPE_PDEPT:
-            table_array_addr = g_ept_info.pdept_page_addr_array;
-            break;
-
-        case EPT_TYPE_PTE:
-            table_array_addr = g_ept_info.pte_page_addr_array;
-            break;
-        
-        default:
-            table_array_addr = g_ept_info.pte_page_addr_array;
-            break;
-    }
-
-    return (void*)table_array_addr[index];
-}
-
-/* Get physical address of page table pointer of index and type */
-void* zv_get_pagetable_phy_addr(int type, int index) {
-    void* table_log_addr;
-    
-    table_log_addr = zv_get_pagetable_log_addr(type, index);
-    return (void*)virt_to_phys(table_log_addr);
+void zv_protect_ept_pages(void){
+    //to do
 }
 
 /* Set write-back permission to System RAM area */
@@ -316,6 +86,20 @@ static void zv_setup_ept_system_ram_range(void) {
     }
 
     func(0, g_max_ram_size / PAGE_SIZE, NULL, zv_callback_set_write_back_to_ram);
+}
+
+/*Set ept for iomem*/
+static void zv_setup_ept_iomem_ram_range(u64 start_addr) {
+
+    my_walk_iomem_ram_range func = NULL;
+
+    func = (my_walk_iomem_ram_range)zv_get_symbol_address("walk_iomem_res_desc");
+    if (! func) {
+        zv_log_write(LOG_NONE, "MMU", "zwalk_iomem_res_desc get fail");
+        return;
+    }
+
+    func(IORES_DESC_NONE , 0 , start_addr , -1ULL , NULL ,zv_callback_set_ept_to_iomem);
 }
 
 /*
@@ -342,60 +126,7 @@ static int zv_callback_set_write_back_to_ram(
     return 0;
 }
 
-/* Protect page table memory for EPT */
-void zv_protect_ept_pages(void) {
-    int i;
-    u64 end;
 
-    zv_log_write(LOG_DEBUG, "MMU", "Protect EPT");
-
-    /* Hide the EPT page table */
-    end = (u64)g_ept_info.pml4_page_addr_array + 
-        g_ept_info.pml4_page_count * sizeof(u64*);
-	zv_hide_range((u64)g_ept_info.pml4_page_addr_array, end, ALLOC_VMALLOC);
-
-	end = (u64)g_ept_info.pdpte_pd_page_addr_array +
-		g_ept_info.pdpte_pd_page_count * sizeof(u64*);
-	zv_hide_range((u64)g_ept_info.pdpte_pd_page_addr_array, end, ALLOC_VMALLOC);
-
-	end = (u64)g_ept_info.pdept_page_addr_array +
-		g_ept_info.pdept_page_count * sizeof(u64*);
-	zv_hide_range((u64)g_ept_info.pdept_page_addr_array, end, ALLOC_VMALLOC);
-
-	end = (u64)g_ept_info.pte_page_addr_array +
-		g_ept_info.pte_page_count * sizeof(u64*);
-	zv_hide_range((u64)g_ept_info.pte_page_addr_array, end, ALLOC_VMALLOC);
-
-    for (i = 0 ; i < g_ept_info.pml4_page_count; i ++)
-	{
-		end = (u64)g_ept_info.pml4_page_addr_array[i] + EPT_PAGE_SIZE;
-		zv_hide_range((u64)g_ept_info.pml4_page_addr_array[i], end,
-			ALLOC_KMALLOC);
-	}
-
-	for (i = 0 ; i < g_ept_info.pdpte_pd_page_count; i ++)
-	{
-		end = (u64)g_ept_info.pdpte_pd_page_addr_array[i] + EPT_PAGE_SIZE;
-		zv_hide_range((u64)g_ept_info.pdpte_pd_page_addr_array[i], end,
-			ALLOC_KMALLOC);
-	}
-
-	for (i = 0 ; i < g_ept_info.pdept_page_count; i ++)
-	{
-		end = (u64)g_ept_info.pdept_page_addr_array[i] + EPT_PAGE_SIZE;
-		zv_hide_range((u64)g_ept_info.pdept_page_addr_array[i], end,
-			ALLOC_KMALLOC);
-	}
-
-	for (i = 0 ; i < g_ept_info.pte_page_count; i ++)
-	{
-		end = (u64)g_ept_info.pte_page_addr_array[i] + EPT_PAGE_SIZE;
-		zv_hide_range((u64)g_ept_info.pte_page_addr_array[i], end,
-			ALLOC_KMALLOC);
-	}
-
-    zv_log_write(LOG_DEBUG, "MMU", "    [*] Complete");
-}
 
 /*
  * Hide a physical page to protect it from the guest.
@@ -451,6 +182,183 @@ static void zv_set_ept_page_addr(u64 phy_addr, u64 addr) {
         | (page_table_addr[page_index] & ~MASK_PAGEADDR); // extra flags 
 }
 
+u64 guest_to_host(u64 x){
+	struct zv_ept_pagetable * ept_ptr;
+	struct zv_ept_pagetable * PDPE_addr;
+	struct zv_ept_pagetable * PDE_addr;
+	struct zv_ept_pagetable * PTE_addr;
+	struct zv_ept_pagetable * phy_addr;
+
+	u64 PML4E_offset = (x>>39) & MASK_EPT_OFFSET;
+	u64 PDPE_offset = (x>>30) & MASK_EPT_OFFSET;
+	u64 PDE_offset = (x>>21) & MASK_EPT_OFFSET;
+	u64 PTE_offset = (x>>12) & MASK_EPT_OFFSET;
+	u64 phy_offset = x & ~MASK_PAGEADDR;
+	
+	ept_ptr = (void*)xa_load(&zv_pml4_table,0);
+	PDPE_addr = CHANGE_ADDR(ept_ptr->entry[PML4E_offset])
+	PDE_addr = CHANGE_ADDR(PDPE_addr->entry[PDPE_offset])
+	PTE_addr = CHANGE_ADDR(PDE_addr->entry[PDE_offset])
+	phy_addr = (void*)((PTE_addr->entry[PTE_offset])&(~((u64)0xfff)));
+
+	return (u64)phy_addr +  phy_offset;
+} 
+
+void * zv_get_pagetable_log_addr(unsigned long type, int index){
+    void* entry;
+    int result;
+    struct xarray * xa;
+    switch (type) {
+        case EPT_TYPE_PML4: 
+            entry = xa_load(&zv_pml4_table, index);
+            xa = &zv_pml4_table;
+            break;
+        
+        case EPT_TYPE_PDPTEPD:
+            entry = xa_load(&zv_pdpte_pd_table, index);
+            xa = &zv_pdpte_pd_table;
+            break;
+        
+        case EPT_TYPE_PDEPT:
+            entry = xa_load(&zv_pdept_table, index);
+            xa = &zv_pdept_table;
+            break;
+
+        case EPT_TYPE_PTE:
+            entry = xa_load(&zv_pte_table, index);
+            xa = &zv_pte_table;
+            break;
+        
+        default:
+            break;
+    }
+    if(!entry) {
+        entry = zv_kmalloc(EPT_PAGE_SIZE, GFP_ATOMIC);
+        zv_log_write(LOG_DETAIL,"MMU", "addr not found in xarray , allocate new page:%px", entry);
+        result = xa_insert(xa, index, entry, GFP_ATOMIC);
+    }
+    return entry;
+}
 
 
+void * zv_get_pagetable_phy_addr(unsigned long type, int index){
+    return (void*)virt_to_phys(zv_get_pagetable_log_addr(type, index));
 
+}
+
+static void zv_set_ept_page(struct zv_ept_info* ept_info_high , int type , u64 start_align){
+    struct zv_pagetable* pagetable;
+    u64 offset_ept;
+    u64 offset_start;
+    u64 offset_real; //offset in page
+    u64 ent_count;
+    u64 index; //index of page
+    u64 i;
+    unsigned long index_base;
+    unsigned long index_base_next;
+    switch (type){
+        case EPT_TYPE_PML4:
+            offset_ept = 39;
+            ent_count = ept_info_high->pml4_ent_count;
+            index_base = start_align / VAL_256TB;
+            index_base_next = start_align / VAL_512GB;
+            break;
+        case EPT_TYPE_PDPTEPD:
+            offset_ept = 30;
+            ent_count = ept_info_high->pdpte_pd_ent_count;
+            index_base = start_align / VAL_512GB;
+            index_base_next = start_align / VAL_1GB;
+            break;
+        case EPT_TYPE_PDEPT:
+            offset_ept = 21;
+            ent_count = ept_info_high->pdept_ent_count;
+            index_base = start_align / VAL_1GB;
+            index_base_next = start_align / VAL_2MB;
+            break;
+        case EPT_TYPE_PTE:
+            offset_ept = 12;
+            ent_count = ept_info_high->pte_ent_count;
+            index_base = start_align / VAL_2MB;
+            break;
+        default:
+            break;
+    }
+
+    offset_start = (start_align >> offset_ept) & MASK_EPT_OFFSET;
+    pagetable = zv_get_pagetable_log_addr(type, index_base);
+    for(i = 0; i < ent_count; i ++) {
+        offset_real = (i + offset_start) % 512;
+        if (offset_real == 0) {
+            index = (i + offset_start) / 512;
+            pagetable = zv_get_pagetable_log_addr(type, index + index_base);
+        }
+        if (type != EPT_TYPE_PTE) {
+            /* Not PTE: Set next level's pointer */
+            pagetable->entry[offset_real] = (u64)zv_get_pagetable_phy_addr(type + 1, index_base_next + i) | EPT_ALL_ACCESS;
+        }else{
+            /* PTE: Set the physical mapping */
+            pagetable->entry[offset_real] = (start_align + i * EPT_PAGE_SIZE) | EPT_ALL_ACCESS;
+        }
+    }
+}
+
+void zv_add_ept_map_range(u64 start,u64 end){
+    struct zv_ept_info ept_info_high;
+    u64 start_align =  start & MASK_PAGEADDR;
+    u64 end_align = (end + 0xfff) & MASK_PAGEADDR;
+    u64 size = (end_align - start_align);
+    /* calculate entry count */
+    ept_info_high.pml4_ent_count     = CEIL(size , VAL_512GB);
+    ept_info_high.pdpte_pd_ent_count = CEIL(size , VAL_1GB);
+    ept_info_high.pdept_ent_count    = CEIL(size , VAL_2MB);
+    ept_info_high.pte_ent_count      = CEIL(size , VAL_4KB);
+    /* calculate page count */
+    ept_info_high.pml4_page_count     = CEIL(size , VAL_256TB);
+    ept_info_high.pdpte_pd_page_count = CEIL(size , VAL_512GB);
+    ept_info_high.pdept_page_count    = CEIL(size , VAL_1GB);
+    ept_info_high.pte_page_count      = CEIL(size , VAL_2MB);
+    /* delete page_array in ept_info so we needn't to alloct space,we now just use it to store basic ept info */
+    zv_set_ept_page(&ept_info_high,EPT_TYPE_PML4,start_align);
+    zv_set_ept_page(&ept_info_high,EPT_TYPE_PDPTEPD,start_align);
+    zv_set_ept_page(&ept_info_high,EPT_TYPE_PDEPT,start_align);
+    zv_set_ept_page(&ept_info_high,EPT_TYPE_PTE,start_align);
+    /* when start addr = 0 means initial of the moudule,so we initialize iomem */
+    if(start == 0){
+        zv_setup_ept_system_ram_range();
+        zv_setup_ept_iomem_ram_range(end_align);
+    }
+}
+
+static struct resource *zv_get_next_resource(struct resource *p, bool sibling_only)
+{
+	/* Caller wants to traverse through siblings only */
+	if (sibling_only)
+		return p->sibling;
+	if (p->child)
+		return p->child;
+	while (!p->sibling && p->parent)
+		p = p->parent;
+	return p->sibling;
+}
+
+static int zv_callback_set_ept_to_iomem(struct resource* res,void * arg){
+    struct resource *p;
+    struct resource * (*func)(struct resource * , resource_size_t) = (void*)zv_get_symbol_address("lookup_resource");
+    /*
+        function walk_iomem_res_desc doesn't return a complete resource struct(without child),
+    so we use lookup_resource to get the address.
+    */
+    res = func(&iomem_resource,res->start);
+    p = res;
+    zv_log_write(LOG_DEBUG,"MMU","find resource: %s, start_addr: %16llX end_addr: %16llX child:%p sibling:%p ",
+        res->name,res->start,res->end,res->child,res->sibling);
+    p = zv_get_next_resource(p,0);
+    while(zv_get_next_resource(p,0) != NULL){
+        p = zv_get_next_resource(p,0);
+        if(!(p->child)){
+            zv_add_ept_map_range(p->start,p->end);
+            zv_log_write(LOG_DEBUG,"MMU","add resource: %s, start_addr: %16llX end_addr: %16llX",p->name,p->start,p->end);
+        }
+    }
+    return 0;
+}
