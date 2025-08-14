@@ -40,11 +40,6 @@
 #define EPT_PAGE_ENT_COUNT		512
 #define EPT_PAGE_SIZE			4096
 
-
-
-/*define xarray to store ept page*/
-
-
 /* Macro for GPA to HPA*/
 #define CHANGE_ADDR(x) phys_to_virt(((u64)x)&(~MASK_PAGEFLAG));
 
@@ -78,7 +73,7 @@ struct zv_ept_pagetable
 };
 
 
-/* VarSiables */
+/* Variables */
 #ifndef XARRAY
 #define XARRAY
     extern struct xarray zv_pml4_table;
@@ -110,6 +105,6 @@ void zv_protect_ept_pages(void);
 void* check_addr_page(u64 x,int type,u64 page_addr,u64 pre_page_addr,u64 offset);
 
 /* Function to add mem range to ept*/
-void zv_add_mem_range(u64 start, u64 end);
+void zv_add_ept_map_range(u64 start, u64 end);
 
 u64 guest_to_host(u64 x);

@@ -187,7 +187,7 @@ static int __init zeroVisor_init(void) {
 
     /* Allcate the required memory */
     zv_alloc_vmcs_memory();
-    zv_add_mem_range(0,g_max_ram_size);
+    zv_add_ept_map_range(0,g_max_ram_size);
     
     /* Protect the memory */
     zv_protect_ept_pages();

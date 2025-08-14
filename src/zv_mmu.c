@@ -195,13 +195,11 @@ u64 guest_to_host(u64 x){
 	u64 PTE_offset = (x>>12) & MASK_EPT_OFFSET;
 	u64 phy_offset = x & ~MASK_PAGEADDR;
 	
-
 	ept_ptr = (void*)xa_load(&zv_pml4_table,0);
 	PDPE_addr = CHANGE_ADDR(ept_ptr->entry[PML4E_offset])
 	PDE_addr = CHANGE_ADDR(PDPE_addr->entry[PDPE_offset])
 	PTE_addr = CHANGE_ADDR(PDE_addr->entry[PDE_offset])
 	phy_addr = (void*)((PTE_addr->entry[PTE_offset])&(~((u64)0xfff)));
-
 
 	return (u64)phy_addr +  phy_offset;
 } 
@@ -212,39 +210,39 @@ void * zv_get_pagetable_log_addr(unsigned long type, int index){
     struct xarray * xa;
     switch (type) {
         case EPT_TYPE_PML4: 
-            entry = xa_load(&zv_pml4_table,index);
+            entry = xa_load(&zv_pml4_table, index);
             xa = &zv_pml4_table;
             break;
         
         case EPT_TYPE_PDPTEPD:
-            entry = xa_load(&zv_pdpte_pd_table,index);
+            entry = xa_load(&zv_pdpte_pd_table, index);
             xa = &zv_pdpte_pd_table;
             break;
         
         case EPT_TYPE_PDEPT:
-            entry = xa_load(&zv_pdept_table,index);
+            entry = xa_load(&zv_pdept_table, index);
             xa = &zv_pdept_table;
             break;
 
         case EPT_TYPE_PTE:
-            entry = xa_load(&zv_pte_table,index);
+            entry = xa_load(&zv_pte_table, index);
             xa = &zv_pte_table;
             break;
         
         default:
             break;
     }
-    if(!entry){
-        entry = zv_kmalloc(EPT_PAGE_SIZE,GFP_ATOMIC);
-        zv_log_write(LOG_DETAIL,"MMU", "addr not found in xarray , allocate new page:%px",entry);
-        result = xa_insert(xa,index,entry,GFP_ATOMIC);
+    if(!entry) {
+        entry = zv_kmalloc(EPT_PAGE_SIZE, GFP_ATOMIC);
+        zv_log_write(LOG_DETAIL,"MMU", "addr not found in xarray , allocate new page:%px", entry);
+        result = xa_insert(xa, index, entry, GFP_ATOMIC);
     }
     return entry;
 }
 
 
 void * zv_get_pagetable_phy_addr(unsigned long type, int index){
-    return (void*)virt_to_phys(zv_get_pagetable_log_addr(type,index));
+    return (void*)virt_to_phys(zv_get_pagetable_log_addr(type, index));
 
 }
 
@@ -252,9 +250,9 @@ static void zv_set_ept_page(struct zv_ept_info* ept_info_high , int type , u64 s
     struct zv_pagetable* pagetable;
     u64 offset_ept;
     u64 offset_start;
-    u64 offset_real;//offset in page
+    u64 offset_real; //offset in page
     u64 ent_count;
-    u64 index;//index of page
+    u64 index; //index of page
     u64 i;
     unsigned long index_base;
     unsigned long index_base_next;
@@ -262,68 +260,69 @@ static void zv_set_ept_page(struct zv_ept_info* ept_info_high , int type , u64 s
         case EPT_TYPE_PML4:
             offset_ept = 39;
             ent_count = ept_info_high->pml4_ent_count;
-            index_base = start_align/VAL_256TB;
-            index_base_next = start_align/VAL_512GB;
+            index_base = start_align / VAL_256TB;
+            index_base_next = start_align / VAL_512GB;
             break;
         case EPT_TYPE_PDPTEPD:
             offset_ept = 30;
             ent_count = ept_info_high->pdpte_pd_ent_count;
-            index_base = start_align/VAL_512GB;
-            index_base_next = start_align/VAL_1GB;
+            index_base = start_align / VAL_512GB;
+            index_base_next = start_align / VAL_1GB;
             break;
         case EPT_TYPE_PDEPT:
             offset_ept = 21;
             ent_count = ept_info_high->pdept_ent_count;
-            index_base = start_align/VAL_1GB;
-            index_base_next = start_align/VAL_2MB;
+            index_base = start_align / VAL_1GB;
+            index_base_next = start_align / VAL_2MB;
             break;
         case EPT_TYPE_PTE:
             offset_ept = 12;
             ent_count = ept_info_high->pte_ent_count;
-            index_base = start_align/VAL_2MB;
+            index_base = start_align / VAL_2MB;
             break;
         default:
             break;
     }
 
-    offset_start = (start_align>>offset_ept) & MASK_EPT_OFFSET;
-    pagetable = zv_get_pagetable_log_addr(type,index_base);
-    for(i = 0;i < ent_count ; i++){
+    offset_start = (start_align >> offset_ept) & MASK_EPT_OFFSET;
+    pagetable = zv_get_pagetable_log_addr(type, index_base);
+    for(i = 0; i < ent_count; i ++) {
         offset_real = (i + offset_start) % 512;
-        if(offset_real == 0){
-            index = (i + offset_start)/512;
-            pagetable = zv_get_pagetable_log_addr(type,index + index_base);
+        if (offset_real == 0) {
+            index = (i + offset_start) / 512;
+            pagetable = zv_get_pagetable_log_addr(type, index + index_base);
         }
-        if(type != EPT_TYPE_PTE){
-            pagetable->entry[offset_real] = (u64)zv_get_pagetable_phy_addr(type + 1,index_base_next + i) | EPT_ALL_ACCESS;
+        if (type != EPT_TYPE_PTE) {
+            /* Not PTE: Set next level's pointer */
+            pagetable->entry[offset_real] = (u64)zv_get_pagetable_phy_addr(type + 1, index_base_next + i) | EPT_ALL_ACCESS;
         }else{
+            /* PTE: Set the physical mapping */
             pagetable->entry[offset_real] = (start_align + i * EPT_PAGE_SIZE) | EPT_ALL_ACCESS;
         }
-        
     }
 }
 
-void zv_add_mem_range(u64 start,u64 end){
+void zv_add_ept_map_range(u64 start,u64 end){
     struct zv_ept_info ept_info_high;
     u64 start_align =  start & MASK_PAGEADDR;
     u64 end_align = (end + 0xfff) & MASK_PAGEADDR;
     u64 size = (end_align - start_align);
-    /*calculate entry count*/
+    /* calculate entry count */
     ept_info_high.pml4_ent_count     = CEIL(size , VAL_512GB);
     ept_info_high.pdpte_pd_ent_count = CEIL(size , VAL_1GB);
     ept_info_high.pdept_ent_count    = CEIL(size , VAL_2MB);
     ept_info_high.pte_ent_count      = CEIL(size , VAL_4KB);
-    /*calculate page count*/
+    /* calculate page count */
     ept_info_high.pml4_page_count     = CEIL(size , VAL_256TB);
     ept_info_high.pdpte_pd_page_count = CEIL(size , VAL_512GB);
     ept_info_high.pdept_page_count    = CEIL(size , VAL_1GB);
     ept_info_high.pte_page_count      = CEIL(size , VAL_2MB);
-    /*delete page_array in ept_info so we needn't to alloct space,we now just use it to store basic ept info*/
+    /* delete page_array in ept_info so we needn't to alloct space,we now just use it to store basic ept info */
     zv_set_ept_page(&ept_info_high,EPT_TYPE_PML4,start_align);
     zv_set_ept_page(&ept_info_high,EPT_TYPE_PDPTEPD,start_align);
     zv_set_ept_page(&ept_info_high,EPT_TYPE_PDEPT,start_align);
     zv_set_ept_page(&ept_info_high,EPT_TYPE_PTE,start_align);
-    /*when start addr = 0 means initial of the moudule,so we initialize iomem*/
+    /* when start addr = 0 means initial of the moudule,so we initialize iomem */
     if(start == 0){
         zv_setup_ept_system_ram_range();
         zv_setup_ept_iomem_ram_range(end_align);
@@ -357,7 +356,7 @@ static int zv_callback_set_ept_to_iomem(struct resource* res,void * arg){
     while(zv_get_next_resource(p,0) != NULL){
         p = zv_get_next_resource(p,0);
         if(!(p->child)){
-            zv_add_mem_range(p->start,p->end);
+            zv_add_ept_map_range(p->start,p->end);
             zv_log_write(LOG_DEBUG,"MMU","add resource: %s, start_addr: %16llX end_addr: %16llX",p->name,p->start,p->end);
         }
     }
