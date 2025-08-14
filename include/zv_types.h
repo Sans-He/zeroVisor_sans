@@ -124,7 +124,7 @@ struct zv_vm_control_register
 	u64 ept_ptr;
 	u64 msr_bitmap_addr;
 	u64 vm_entry_ctrl_field;
-	u64 vm_exti_ctrl_field;
+	u64 vm_exit_ctrl_field;
 	u64 virt_apic_page_addr;
 	u64 cr4_guest_host_mask;
 	u64 cr4_read_shadow;
@@ -149,3 +149,34 @@ struct zv_vm_exit_guest_register
 	u64 rax;
 	u64 rbp;
 };
+
+#ifdef ZEROVISOR_USE_SHUTDOWN
+
+/* Shared context between the host and the guest */
+struct zv_share_context
+{
+	atomic_t shutdown_flag;
+	atomic_t shutdown_complete_count;
+};
+
+/* Guest full context for VMX off. */
+struct zv_vm_full_context
+{
+	u64 cr4;
+	u64 cr3;
+	u64 cr0;
+
+	u64 tr_selector;
+	u64 ldtr_selector;
+	u64 gs_selector;
+	u64 fs_selector;
+	u64 es_selector;
+	u64 ds_selector;
+	u64 cs_selector;
+
+	struct zv_vm_exit_guest_register gp_register;
+	u64 rflags;
+	u64 rip;
+};
+
+#endif

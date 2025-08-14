@@ -6,6 +6,7 @@
 
 #include <linux/smp.h>
 #include <linux/io.h>
+#include <asm/desc.h>
 
 #include <../include/zv_config.h>
 #include <../include/zv_types.h>
@@ -46,9 +47,18 @@ static int zv_check_gdtr(int cpu_id);
 
 
 // exit_callback
-static void zv_vm_exit_callback_int(
+static void zv_vm_exit_callback_interrupts(
     int cpu_id,
-    unsigned long dr6,
+    u64 exit_qual,
+    struct zv_vm_exit_guest_register* guest_context
+);
+static void zv_vm_exit_callback_interrupt_debug(
+    int cpu_id,
+    u64 exit_qual,
+    struct zv_vm_exit_guest_register* guest_context
+);
+static void zv_vm_exit_callback_interrupt_breakpoint(
+    int cpu_id,
     struct zv_vm_exit_guest_register* guest_context
 );
 static void zv_vm_exit_callback_init_signal(int cpu_id);
@@ -78,8 +88,24 @@ static void zv_vm_exit_callback_ept_violation(
     u64 guest_linear,
     u64 guest_physical
 );
-
 static void zv_vm_exit_callback_pre_timer_expired(int cpu_id);
+static void zv_vm_exit_callback_vmcall(
+    int cpu_id,
+    struct zv_vm_exit_guest_register* guest_context
+);
+static void zv_shutdown_vm_this_core(
+    int cpu_id,
+    struct zv_vm_exit_guest_register* guest_context
+);
+static void zv_fill_context_from_vm_guest(
+    struct zv_vm_exit_guest_register* guest_context,
+    struct zv_vm_full_context* full_context
+);
+static void zv_restore_context_from_vm_guest(
+    int cpu_id,
+    struct zv_vm_full_context* full_context,
+    u64 guest_rsp
+);
 
 /* Process vm_exit event */
 void zv_vm_exit_callback(struct zv_vm_exit_guest_register* guest_context) {
@@ -108,7 +134,7 @@ void zv_vm_exit_callback(struct zv_vm_exit_guest_register* guest_context) {
 
     switch(exit_reason & 0xFFFF) {
         case VM_EXIT_REASON_EXCEPT_OR_NMI:
-            zv_vm_exit_callback_int(cpu_id, exit_qual, guest_context);
+            zv_vm_exit_callback_interrupts(cpu_id, exit_qual, guest_context);
             break;
         
         case VM_EXIT_REASON_EXT_INTTERUPT:
@@ -166,7 +192,7 @@ void zv_vm_exit_callback(struct zv_vm_exit_guest_register* guest_context) {
             break;
 
         case VM_EXIT_REASON_VMCALL:
-            // TODO()
+            zv_vm_exit_callback_vmcall(cpu_id, guest_context);
             break;
 
         case VM_EXIT_REASON_VMCLEAR:
@@ -348,34 +374,96 @@ static void zv_advance_vm_guest_rip(void) {
 }
 
 /* Process interrupt callback */
-static void zv_vm_exit_callback_int(
+static void zv_vm_exit_callback_interrupts(
     int cpu_id,
-    unsigned long dr6,
+    u64 exit_qual,
     struct zv_vm_exit_guest_register* guest_context
 ) {
-    unsigned long dr7;
     u64 info_field;
+    u32 int_type;
+    u32 vector;
+    u64 guest_rip;
 
-    // 8:10 bit is NMI
+    // Read VM Exit interrupt information field
     zv_read_vmcs(VM_DATA_VM_EXIT_INT_INFO, &info_field);
-    if (VM_EXIT_INT_INFO_INT_TYPE(info_field) == VM_EXIT_INT_TYPE_NMI) {
-        zv_log_write(LOG_NONE, "VMExit", "VM [%d] NMI Interrupt Occured", cpu_id);
+    zv_read_vmcs(VM_GUEST_RIP, &guest_rip);
+    
+    /* interupt type */
+    int_type = VM_EXIT_INT_INFO_INT_TYPE(info_field);
+    /* interrupts vector ID */
+    vector = VM_EXIT_INT_INFO_VECTOR(info_field);
+    
+    zv_log_write(LOG_DETAIL, "VMExit", "VM [%d] Exception/Interrupt: type=%d, vector=%d", 
+        cpu_id, int_type, vector);
+
+    switch (int_type) {
+        case VM_EXIT_INT_TYPE_EXT:
+            zv_log_write(LOG_NONE, "VMExit", "VM [%d] External Interrupt Vector %d Detected", cpu_id, vector);
+            break;
+            
+        case VM_EXIT_INT_TYPE_NMI:
+            zv_log_write(LOG_NONE, "VMExit", "VM [%d] NMI Interrupt Detected", cpu_id);
+            break;
+            
+        case VM_EXIT_INT_TYPE_HW:
+            switch (vector) {
+                case EXCEPTION_VECTOR_DEBUG:
+                    zv_vm_exit_callback_interrupt_debug(cpu_id, exit_qual, guest_context);
+                    break;
+                    
+                case EXCEPTION_VECTOR_PAGE_FAULT:
+                    zv_log_write(LOG_NONE, "VMExit", "VM [%d] Page Fault Exception Detected", cpu_id);
+                    break;
+                    
+                case EXCEPTION_VECTOR_GENERAL_PROTECTION:
+                    zv_log_write(LOG_NONE, "VMExit", "VM [%d] General Protection Fault Detected", cpu_id);
+                    break;
+                    
+                default:
+                    zv_log_write(LOG_NONE, "VMExit", "VM [%d] Hardware Exception Vector %d Detected", cpu_id, vector);
+                    break;
+            }
+            break;
+            
+        case VM_EXIT_INT_TYPE_PRIV_SW:
+            switch (vector) {
+                case EXCEPTION_VECTOR_DEBUG:
+                    zv_log_write(LOG_NONE, "VMExit", "VM [%d] Debug Exception from INT1 Instruction Detected (privileged software)", cpu_id);
+                    break;
+                    
+                default:
+                    zv_log_write(LOG_NONE, "VMExit", "VM [%d] Privileged Software Exception Vector %d Detected", cpu_id, vector);
+                    break;
+            }
+            break;
+            
+        case VM_EXIT_INT_TYPE_SW: 
+            switch (vector) {
+                case EXCEPTION_VECTOR_BREAKPOINT:
+                    zv_log_write(LOG_NONE, "VMExit", "VM [%d] INT3 Breakpoint Exception Detected at RIP: %016lX", 
+                        cpu_id, guest_rip);
+                    zv_vm_exit_callback_interrupt_breakpoint(cpu_id, guest_context);
+                    break;
+                    
+                case EXCEPTION_VECTOR_OVERFLOW:
+                    zv_log_write(LOG_NONE, "VMExit", "VM [%d] Overflow Exception from INTO Instruction Detected", cpu_id);
+                    break;
+                    
+                default:
+                    zv_log_write(LOG_NONE, "VMExit", "VM [%d] Software Exception Vector %d Detected", cpu_id, vector);
+                    break;
+            }
+            break;
+            
+        default:
+            zv_log_write(LOG_NONE, "VMExit", "VM [%d] Unknown Interrupt Type %d, Vector %d Detected", 
+                cpu_id, int_type, vector);
+            break;
     }
 
-    /* For stable shutdown, skip processing if system is shutdowning */
     if(zv_is_system_shutdowning() == 0) {
-        // Blank timer operation
+        // Blank timer operation for normal operation
     }
-
-    dr6 &= 0xfffffffffffffff0;
-	set_debugreg(dr6, 6);
-
-	/* When the guest is resumed, Let the guest skip hardware breakpoint. */
-	zv_read_vmcs(VM_GUEST_RFLAGS, (u64*)&dr7);
-	dr7 |= RFLAGS_BIT_RF;
-	zv_write_vmcs(VM_GUEST_RFLAGS, dr7);
-
-	zv_remove_int1_exception_from_vm();
 }
 
 /* Remove INT1 exception from the guest */
@@ -385,6 +473,66 @@ static void zv_remove_int1_exception_from_vm(void) {
     zv_read_vmcs(VM_CTRL_VM_ENTRY_INT_INFO_FIELD, &info_field);
 	info_field &= ~((u64) 0x01 << 1);
 	zv_write_vmcs(VM_CTRL_VM_ENTRY_INT_INFO_FIELD, info_field);
+}
+
+/* Process INT3 breakpoint exception */
+static void zv_vm_exit_callback_interrupt_breakpoint(
+    int cpu_id,
+    struct zv_vm_exit_guest_register* guest_context
+) {
+    u64 guest_rip;
+    u64 inst_length;
+    
+    zv_read_vmcs(VM_GUEST_RIP, &guest_rip);
+    zv_read_vmcs(VM_DATA_VM_EXIT_INST_LENGTH, &inst_length);
+    
+    zv_log_write(LOG_NONE, "VMExit", "VM [%d] INT3 Breakpoint at RIP: %016lX, instruction length: %d", 
+        cpu_id, guest_rip, (u32)inst_length);
+    
+    // Log register state for debugging
+    zv_log_write(LOG_DETAIL, "VMExit", "VM [%d] RAX: %016lX, RBX: %016lX, RCX: %016lX, RDX: %016lX", 
+        cpu_id, guest_context->rax, guest_context->rbx, guest_context->rcx, guest_context->rdx);
+    zv_log_write(LOG_DETAIL, "VMExit", "VM [%d] RSI: %016lX, RDI: %016lX, RBP: %016lX", 
+        cpu_id, guest_context->rsi, guest_context->rdi, guest_context->rbp);
+    zv_log_write(LOG_DETAIL, "VMExit", "VM [%d] R8: %016lX, R9: %016lX, R10: %016lX, R11: %016lX", 
+        cpu_id, guest_context->r8, guest_context->r9, guest_context->r10, guest_context->r11);
+    zv_log_write(LOG_DETAIL, "VMExit", "VM [%d] R12: %016lX, R13: %016lX, R14: %016lX, R15: %016lX", 
+        cpu_id, guest_context->r12, guest_context->r13, guest_context->r14, guest_context->r15);
+    
+    // Here you can add your breakpoint handling logic:
+    // - Analyze the instruction that caused the breakpoint
+    // - Implement step-by-step debugging
+    // - Set/remove dynamic breakpoints
+    // - Communicate with a debugger
+    
+    // For now, just advance RIP to skip the INT3 instruction
+    zv_advance_vm_guest_rip();
+    
+    zv_log_write(LOG_NONE, "VMExit", "VM [%d] INT3 breakpoint handled, continuing execution", cpu_id);
+}
+
+/* Process hardware debug exception */
+static void zv_vm_exit_callback_interrupt_debug(
+    int cpu_id,
+    u64 exit_qual,
+    struct zv_vm_exit_guest_register* guest_context
+) {
+    unsigned long dr7;
+    unsigned long dr6;
+    
+    // For debug exceptions via VM Exit, exit_qual contains the DR6 information
+    dr6 = (unsigned long)exit_qual;
+
+    // Clear DR6 debug status register (clear specific debug event flags)
+    dr6 &= 0xfffffffffffffff0;
+    set_debugreg(dr6, 6);
+
+    /* When the guest is resumed, let the guest skip hardware breakpoint. */
+    zv_read_vmcs(VM_GUEST_RFLAGS, (u64*)&dr7);
+    dr7 |= RFLAGS_BIT_RF;
+    zv_write_vmcs(VM_GUEST_RFLAGS, dr7);
+
+    zv_remove_int1_exception_from_vm();
 }
 
 /* Process INIT IPI */
@@ -975,4 +1123,107 @@ void zv_vm_resume_fail_callback(u64 error) {
 
     zv_log_write(LOG_NONE, "VMExit", "VM RESUME FAIL %d !", error);
     zv_log_error(ERROR_LAUNCH_FAIL);
+}
+
+/* Process VM call */
+static void zv_vm_exit_callback_vmcall(
+    int cpu_id,
+    struct zv_vm_exit_guest_register* guest_context
+) {
+    u64 service_id;
+    void* arg;
+
+    service_id = guest_context->rax;
+    arg = (void*)guest_context->rbx;
+
+    zv_log_write(LOG_DEBUG, "VMExit", "VM [%d] VMCALL index[%ld]", cpu_id, service_id);
+    /* Move RIP to next instruction */
+    zv_advance_vm_guest_rip();
+
+    switch (service_id) {
+#ifdef ZEROVISOR_USE_SHUTDOWN
+        case VM_SERVICE_SHUTDOWN:
+            atomic_set(&(g_share_context->shutdown_flag), 1);
+            break;
+        case VM_SERVICE_SHUTDOWN_THIS_CORE:
+            zv_shutdown_vm_this_core(cpu_id, guest_context);
+            break;
+#endif
+
+        default:
+            zv_advance_vm_guest_rip();
+            break;
+    }
+}
+
+/* Shutdown zeroVisor */
+static void zv_shutdown_vm_this_core(
+    int cpu_id,
+    struct zv_vm_exit_guest_register* guest_context
+) {
+    struct zv_vm_full_context full_context;
+	u64 guest_VMCS_log_addr;
+	u64 guest_VMCS_phy_addr;
+	u64 guest_rsp;
+
+    // zv_log_write(LOG_DEBUG, "Core", "VM [%d] zv_shutdown_vm_this_core is called", cpu_id);
+
+    zv_read_vmcs(VM_GUEST_RSP, &guest_rsp);
+    zv_fill_context_from_vm_guest(guest_context, &full_context);
+
+    guest_VMCS_log_addr = (u64)(g_guest_vmcs_log_addr[cpu_id]);
+	guest_VMCS_phy_addr = (u64)virt_to_phys((void*)guest_VMCS_log_addr);
+
+    zv_clear_vmcs(&guest_VMCS_phy_addr);
+    zv_stop_vmx();
+
+    /* Restore original GDTR/IDTR using kernel APIs */
+    zv_log_write(LOG_DEBUG, "Core", "VM [%d] Restoring original GDTR/IDTR", cpu_id);
+    zv_log_write(LOG_DEBUG, "Core", "VM [%d] Original GDTR: %016lX, Size: %d", 
+        cpu_id, g_gdtr_array[cpu_id].address, g_gdtr_array[cpu_id].size);
+    zv_log_write(LOG_DEBUG, "Core", "VM [%d] Original IDTR: %016lX, Size: %d", 
+        cpu_id, g_idtr_array[cpu_id].address, g_idtr_array[cpu_id].size);
+    
+    load_gdt(&g_gdtr_array[cpu_id]);
+    load_idt(&g_idtr_array[cpu_id]);
+
+    zv_restore_context_from_vm_guest(cpu_id, &full_context, guest_rsp);
+}
+
+/* Fill guest context from the guest VMCS */
+static void zv_fill_context_from_vm_guest(
+    struct zv_vm_exit_guest_register* guest_context,
+    struct zv_vm_full_context* full_context
+) {
+	memcpy(&(full_context->gp_register), guest_context, sizeof(struct zv_vm_exit_guest_register));
+
+	zv_read_vmcs(VM_GUEST_CS_SELECTOR, &(full_context->cs_selector));
+	zv_read_vmcs(VM_GUEST_DS_SELECTOR, &(full_context->ds_selector));
+	zv_read_vmcs(VM_GUEST_ES_SELECTOR, &(full_context->es_selector));
+	zv_read_vmcs(VM_GUEST_FS_SELECTOR, &(full_context->fs_selector));
+	zv_read_vmcs(VM_GUEST_GS_SELECTOR, &(full_context->gs_selector));
+
+	zv_read_vmcs(VM_GUEST_LDTR_SELECTOR, &(full_context->ldtr_selector));
+	zv_read_vmcs(VM_GUEST_TR_SELECTOR, &(full_context->tr_selector));
+
+	zv_read_vmcs(VM_GUEST_CR0, &(full_context->cr0));
+	zv_read_vmcs(VM_GUEST_CR3, &(full_context->cr3));
+	zv_read_vmcs(VM_GUEST_CR4, &(full_context->cr4));
+	zv_read_vmcs(VM_GUEST_RIP, &(full_context->rip));
+	zv_read_vmcs(VM_GUEST_RFLAGS, &(full_context->rflags));
+}
+
+/* Restore the guest VMCS from the full context */
+static void zv_restore_context_from_vm_guest(
+    int cpu_id,
+    struct zv_vm_full_context* full_context,
+    u64 guest_rsp
+) {
+    u64 target_addr;
+
+    /* Copy context to stack and restore */
+	target_addr = guest_rsp - sizeof(struct zv_vm_full_context);
+	memcpy((void*)target_addr, full_context, sizeof(struct zv_vm_full_context));
+
+	zv_restore_context_from_stack(target_addr);
 }

@@ -9,6 +9,7 @@
 #include <linux/delay.h>
 #include <linux/irqflags.h>
 #include <linux/kthread.h>
+#include <linux/reboot.h>
 
 #include <asm/io.h>
 #include <asm/desc.h>
@@ -53,6 +54,7 @@ atomic_t g_thread_complete_cnt;
 
 // Some variables used for restoring the scene
 struct desc_ptr g_gdtr_array[MAX_PROCESSOR_COUNT];
+struct desc_ptr g_idtr_array[MAX_PROCESSOR_COUNT];
 
 // Page Table related variables
 u64 g_vm_host_phy_pml4 = 0;
@@ -96,6 +98,12 @@ static void zv_setup_vm_control_register(
     struct zv_vm_control_register* zv_vm_control_register,
     int cpu_id
 );
+static u32 zv_build_ctrl_reg(
+    u64 msr,
+    u32 desired,
+    int cpu_id,
+    const char* tag
+);
 static void zv_vm_set_msr_write_bitmap(
     struct zv_vm_control_register* zv_vm_control_register,
     u64 msr_number
@@ -109,15 +117,25 @@ static void zv_print_vm_result(const char* string, int result);
 static void zv_dup_page_table_for_host(void);
 
 /* support for ZEROVISOR_USE_SHUTDOWN*/
-#if ZEROVISOR_USE_SHUTDOWN
+#ifdef ZEROVISOR_USE_SHUTDOWN
 /* Variables*/
-// static struct notifier_block* g_reboot_nb_ptr = NULL;
-// static struct notifier_block g_reboot_nb = {
-//     .notifier_call = 
-// }
+struct task_struct *g_vm_shutdown_thread_id[MAX_PROCESSOR_COUNT]= {NULL, };
+struct zv_share_context* g_share_context = NULL;
+static struct notifier_block* g_shutdown_nb_ptr = NULL;
 
 /* Functions*/
+static int zv_system_shutdown_notify(
+    struct notifier_block *nb,
+    unsigned long code,
+    void* unused
+);
+static int zv_vm_thread_shutdown(void* arg);
+static void zv_do_shutdown(void);
 
+/* callback struct */
+static struct notifier_block g_shutdown_nb = {
+    .notifier_call = zv_system_shutdown_notify,
+};
 
 #endif
 
@@ -162,9 +180,16 @@ static int __init zeroVisor_init(void) {
         return 0;
     }
 
-#if ZEROVISOR_USE_SHUTDOWN
+#ifdef ZEROVISOR_USE_SHUTDOWN
     /* Add callback funtion for checking system shutdown*/
-    // TODO
+    g_shutdown_nb_ptr = zv_kmalloc(sizeof(struct notifier_block), GFP_KERNEL);
+    memcpy(g_shutdown_nb_ptr, &g_shutdown_nb, sizeof(struct notifier_block));
+    register_reboot_notifier(g_shutdown_nb_ptr);
+
+    /* Create shared context for system shutdown */
+    g_share_context = (struct zv_share_context*)zv_kmalloc(sizeof(struct zv_share_context), GFP_KERNEL);
+    atomic_set(&(g_share_context->shutdown_complete_count), 0);
+    atomic_set(&(g_share_context->shutdown_flag), 0);
 #endif
 
     /* 
@@ -213,13 +238,26 @@ static int __init zeroVisor_init(void) {
     /* Create thread for each core */
     for (i = 0; i < cpu_count; i ++) {
         g_vm_start_thread_id[i] = (struct task_struct*)kthread_create_on_node(
-            zv_vm_thread_start, NULL, cpu_to_node(i), "vm_thread");
+            zv_vm_thread_start, NULL, cpu_to_node(i), "vm_thread"
+        );
 
         if (g_vm_start_thread_id[i]) {
             kthread_bind(g_vm_start_thread_id[i], i);
         } else {
-            zv_log_write(LOG_NORMAL, "Core", "VMX [%d] Thread Run Fail", i);
+            zv_log_write(LOG_NORMAL, "Core", "VMX [%d] Start Thread Run Fail", i);
         }
+
+#ifdef ZEROVISOR_USE_SHUTDOWN
+        g_vm_shutdown_thread_id[i] = (struct task_struct *)kthread_create_on_node(
+            zv_vm_thread_shutdown, NULL, cpu_to_node(i), "vm_thread"
+        );
+
+        if (g_vm_shutdown_thread_id[i]) {
+            kthread_bind(g_vm_shutdown_thread_id[i], i);
+        } else {
+            zv_log_write(LOG_NORMAL, "Core", "VMX [%d] Shutdown Thread Run Fail", i);
+        }
+#endif
     }
 
     /* Duplicate page table for the host and zeroVisor */
@@ -236,6 +274,10 @@ static int __init zeroVisor_init(void) {
             wake_up_process(g_vm_start_thread_id[i]);
             zv_log_write(LOG_DEBUG, "Core", "VMX [%d] Thread Run Success", i);
         }
+
+#ifdef ZEROVISOR_USE_SHUTDOWN
+        wake_up_process(g_vm_shutdown_thread_id[i]);
+#endif
     }
 
     /* Execute thread for this core */
@@ -262,6 +304,12 @@ ERROR_HANDLE:
 }
 
 static void __exit zeroVisor_exit(void) {
+    /* unregister reboot (shutdown) notifier */
+    unregister_reboot_notifier(g_shutdown_nb_ptr);
+
+    /* Do shut-down (vmx off) */
+    zv_do_shutdown();
+
     /* Free all the allocated memory block */
     zv_free_all();
 
@@ -809,18 +857,17 @@ static int zv_init_vmx(int cpu_id) {
 
 /* Protect GDT and IDT */
 static void zv_protect_gdt(int cpu_id) {
-    struct desc_ptr idtr;
 
     native_store_gdt(&g_gdtr_array[cpu_id]);
-    store_idt(&idtr); // some native_* functions erase in 5.X + kernel
+    store_idt(&g_idtr_array[cpu_id]); // 保存到全局数组中
 
     zv_log_write(LOG_DEBUG, "Core", "VM [%d] Protect GDT IDT", cpu_id);
     zv_log_write(LOG_DEBUG, "Core", "VM [%d]    [*] GDTR Base %16lX, Size %d",
         cpu_id, g_gdtr_array[cpu_id].address, g_gdtr_array[cpu_id].size);
     zv_log_write(LOG_DEBUG, "Core", "VM [%d]    [*] IDTR Base %16lX, Size %d",
-        cpu_id, idtr.address, idtr.size);
+        cpu_id, g_idtr_array[cpu_id].address, g_idtr_array[cpu_id].size);
 
-    zv_lock_range(idtr.address, (idtr.address + 0xFFF) & MASK_PAGEADDR, ALLOC_VMALLOC);
+    zv_lock_range(g_idtr_array[cpu_id].address, (g_idtr_array[cpu_id].address + 0xFFF) & MASK_PAGEADDR, ALLOC_VMALLOC);
 }
 
 /* Setup the host registers */
@@ -1187,65 +1234,83 @@ static void zv_setup_vm_control_register(
     struct zv_vm_control_register* zv_vm_control_register,
     int cpu_id
 ) {
-    u64 sec_flags = 0;
+    u32 pin_flags;
+    u32 pri_proc_flags;
+    u32 sec_proc_flags;
+    u32 vm_entry_flags;
+    u32 vm_exit_flags;
+    u32 exception_bitmap_flags;
+
     zv_log_write(LOG_DETAIL, "Core", "VM [%d] Setup VM Control Register", cpu_id);
 
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_DESC_TABLE;
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_UNREST_GUEST;
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_USE_EPT;
+    pin_flags = 0
+        | VM_BIT_VM_PIN_BASED_USE_PRE_TIMER;
 
-    /* Enable rdtscp instrument */
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_RDTSCP;
-    /* Enable xsaves/xrstors instruments */
-    sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_XSAVES_XRSTORS;
-    
-    if (( zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2) >> 32) 
-        & VM_BIT_VM_SEC_PROC_CTRL_ENABLE_INVPCID) {
-        zv_log_write(LOG_DEBUG, "Core", "VM [%d] Support Enable INVPCID", cpu_id);
-        sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_INVPCID;
-    }
+    zv_vm_control_register->pin_based_ctrl = zv_build_ctrl_reg(
+        zv_rdmsr(MSR_IA32_VMX_TRUE_PINBASED_CTLS),
+        pin_flags,
+        cpu_id,
+        "pin-based-ctrl"
+    );
 
-    if (( zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2) >> 32) 
-        & VM_BIT_VM_SEC_PROC_CTRL_ENABLE_USER_WAIT_PAUSE) {
-        zv_log_write(LOG_DEBUG, "Core", "VM [%d] Support Enable USER_WAIT_PAUSE", cpu_id);
-        /* Enable tpause,umonitor or umwait instruments */
-        sec_flags |= VM_BIT_VM_SEC_PROC_CTRL_ENABLE_USER_WAIT_PAUSE;
-    }
-
-    zv_vm_control_register->pin_based_ctrl = 
-        ( zv_rdmsr(MSR_IA32_VMX_TRUE_PINBASED_CTLS)
-        | VM_BIT_VM_PIN_BASED_USE_PRE_TIMER
-        ) & 0xFFFFFFFF; 
-
-    zv_vm_control_register->pri_proc_based_ctrl = 
-        ( zv_rdmsr(MSR_IA32_VMX_TRUE_PROCBASED_CTLS)
+    pri_proc_flags = 0
         | VM_BIT_VM_PRI_PROC_CTRL_USE_IO_BITMAP
         | VM_BIT_VM_PRI_PROC_CTRL_USE_MSR_BITMAP
         | VM_BIT_VM_PRI_PROC_CTRL_USE_SEC_CTRL
-        | VM_BIT_VM_PRI_PROC_CTRL_USE_MOVE_DR
-        ) & 0xFFFFFFFF;
+        | VM_BIT_VM_PRI_PROC_CTRL_USE_MOVE_DR;
 
-    zv_vm_control_register->sec_proc_based_ctrl =
-		( zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2)
-        | sec_flags
-        ) & 0xFFFFFFFF;
+    zv_vm_control_register->pri_proc_based_ctrl = zv_build_ctrl_reg(
+        zv_rdmsr(MSR_IA32_VMX_TRUE_PROCBASED_CTLS),
+        pri_proc_flags,
+        cpu_id,
+        "pri-proc-based-ctrl"
+    );
 
-	zv_vm_control_register->vm_entry_ctrl_field =
-		( zv_rdmsr(MSR_IA32_VMX_TRUE_ENTRY_CTRLS)
+    sec_proc_flags = 0
+        | VM_BIT_VM_SEC_PROC_CTRL_DESC_TABLE
+        | VM_BIT_VM_SEC_PROC_CTRL_UNREST_GUEST
+        | VM_BIT_VM_SEC_PROC_CTRL_USE_EPT
+        | VM_BIT_VM_SEC_PROC_CTRL_ENABLE_RDTSCP
+        | VM_BIT_VM_SEC_PROC_CTRL_ENABLE_XSAVES_XRSTORS
+        | VM_BIT_VM_SEC_PROC_CTRL_ENABLE_INVPCID
+        | VM_BIT_VM_SEC_PROC_CTRL_ENABLE_USER_WAIT_PAUSE;
+
+    zv_vm_control_register->sec_proc_based_ctrl = zv_build_ctrl_reg(
+		zv_rdmsr(MSR_IA32_VMX_PROCBASED_CTLS2),
+        sec_proc_flags,
+        cpu_id,
+        "sec-proc-based-ctrl"
+    );
+
+    vm_entry_flags = 0
         | VM_BIT_VM_ENTRY_CTRL_IA32E_MODE_GUEST
-        | VM_BIT_VM_ENTRY_LOAD_DEBUG_CTRL
-        ) & 0xFFFFFFFF;
+        | VM_BIT_VM_ENTRY_LOAD_DEBUG_CTRL;
 
-    zv_vm_control_register->vm_exti_ctrl_field = 
-        ( zv_rdmsr(MSR_IA32_VMX_TRUE_EXIT_CTRLS)
+	zv_vm_control_register->vm_entry_ctrl_field = zv_build_ctrl_reg(
+		zv_rdmsr(MSR_IA32_VMX_TRUE_ENTRY_CTRLS),
+        vm_entry_flags,
+        cpu_id,
+        "vm-entry-ctrl"
+    );
+
+    vm_exit_flags = 0
         | VM_BIT_VM_EXIT_CTRL_HOST_ADDR_SIZE
         | VM_BIT_VM_EXIT_SAVE_DEBUG_CTRL
         | VM_BIT_VM_EXIT_CTRL_SAVE_PRE_TIMER
-        | VM_BIT_VM_EXIT_CTRL_SAVE_IA32_EFER
-        ) & 0xFFFFFFFF;
+        | VM_BIT_VM_EXIT_CTRL_SAVE_IA32_EFER;
 
-    /* Hardware_BreakPoint enable : 0x02 unable: 0x00 */
-	zv_vm_control_register->except_bitmap = 0x02;
+    zv_vm_control_register->vm_exit_ctrl_field = zv_build_ctrl_reg(
+        zv_rdmsr(MSR_IA32_VMX_TRUE_EXIT_CTRLS),
+        vm_exit_flags,
+        cpu_id,
+        "vm-exit-ctrl"
+    );
+
+    exception_bitmap_flags = 0
+        | VM_BIT_EXCEPT_DEBUG 
+        | VM_BIT_EXCEPT_BREAKPOINT;
+    
+	zv_vm_control_register->except_bitmap = exception_bitmap_flags;
 
     zv_vm_control_register->io_bitmap_addrA = (u64)(g_io_bitmap_addrA[cpu_id]);
 	zv_vm_control_register->io_bitmap_addrB = (u64)(g_io_bitmap_addrB[cpu_id]);
@@ -1281,6 +1346,35 @@ static void zv_setup_vm_control_register(
 
     zv_vm_control_register->cr4_guest_host_mask = CR4_BIT_VMXE;
     zv_vm_control_register->cr4_read_shadow = CR4_BIT_VMXE;
+}
+
+/* Build control register by MSR-CTL and desired */
+static u32 zv_build_ctrl_reg(
+    u64 msr,
+    u32 desired,
+    int cpu_id,
+    const char* tag
+) {
+    
+    u32 supported;
+    u32 unsupported;
+    u32 bit;
+    u32 allowed_0 = (u32)(msr & 0xFFFFFFFF);
+    u32 allowed_1 = (u32)(msr >> 32);
+
+    /* Filter out the bits supported by the hardware */
+    supported = desired & allowed_1;
+    unsupported = desired & ~allowed_1;
+
+    /* Warning the unsupported bits */
+    while (unsupported) {
+        bit = unsupported & -unsupported;
+        zv_log_write(LOG_NORMAL, "Core", "VM [%d]: Ctrl-reg %s bit 0x%08X not supported", 
+            cpu_id, tag, bit);
+        unsupported &= ~bit;
+    }
+
+    return (supported | allowed_0) & allowed_1;
 }
 
 /* Set MSR write bitmap to get a VM exit event of modification */
@@ -1531,7 +1625,7 @@ static void zv_setup_vmcs(
 		zv_vm_control_register->vm_entry_ctrl_field);
 	zv_print_vm_result("    [*] VM Entry Control", result);
 	result = zv_write_vmcs(VM_CTRL_VM_EXIT_CTRLS,
-		zv_vm_control_register->vm_exti_ctrl_field);
+		zv_vm_control_register->vm_exit_ctrl_field);
 	zv_print_vm_result("    [*] VM Exit Control", result);
 	result = zv_write_vmcs(VM_CTRL_VIRTUAL_APIC_ADDR,
 		zv_vm_control_register->virt_apic_page_addr);
@@ -1748,6 +1842,45 @@ static void zv_dup_page_table_for_host(void) {
 		}
 	}
 }
+
+/* Process system shutdown(reboot) notify event */
+static int zv_system_shutdown_notify(
+    struct notifier_block *nb,
+    unsigned long code,
+    void* unused
+) {
+    zv_do_shutdown();
+    return NOTIFY_DONE;
+}
+
+/* Call shut-down function */
+static void zv_do_shutdown(void) {
+    int cpu_count = num_online_cpus();
+
+    /* Call shut-down function */
+    zv_vm_call(VM_SERVICE_SHUTDOWN, NULL);
+
+    zv_log_write(LOG_NONE, "Core", "Shutdown start - cpu count %d", cpu_count);
+
+    while (atomic_read(&(g_share_context->shutdown_complete_count)) < cpu_count) ssleep(1);
+}
+
+/* Disable VT-x & zeroVisor on each core */
+static int zv_vm_thread_shutdown(void* arg) {
+    int cpu_id = smp_processor_id();
+
+    while (atomic_read(&(g_share_context->shutdown_flag)) == 0) {
+        ssleep(1);
+    }
+
+    zv_vm_call(VM_SERVICE_SHUTDOWN_THIS_CORE, NULL);
+
+    zv_log_write(LOG_DEBUG, "Core", "VM [%d] Shutdown compelete !", cpu_id);
+
+    atomic_inc(&(g_share_context->shutdown_complete_count));
+    return 0;
+}
+
 
 module_init(zeroVisor_init);
 module_exit(zeroVisor_exit);
