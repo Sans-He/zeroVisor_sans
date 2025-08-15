@@ -25,6 +25,7 @@
 #include "../include/zv_mmu.h"
 #include "../include/zv_mem_manager.h"
 #include "../include/asm.h"
+#include "../include/zv_func_replace.h"
 
 /* Variables*/
 int g_kernel_version_index = -1;
@@ -149,6 +150,7 @@ static int __init zeroVisor_init(void) {
 
     // sub-modules init
     zv_log_init();
+    zv_func_replace_init();
 
     zv_log_write(LOG_NORMAL, "Core", "Hello, zeroVisor!");
     

@@ -2,6 +2,9 @@
 
 #include "zv_config.h"
 
+#ifndef ZV_TYPE
+#define ZV_TYPE
+
 /* Symbol table entry structure */
 struct zv_symbol_table_entry {
     char* name;
@@ -179,4 +182,5 @@ struct zv_vm_full_context
 	u64 rip;
 };
 
+#endif
 #endif
