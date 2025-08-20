@@ -1,6 +1,7 @@
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
+#include <linux/pagewalk.h>
 #include "../include/zv_types.h"
 
 #define MAP_ANONYMOUS	0x20		/* don't use a file */
@@ -10,7 +11,7 @@
 #define BUFF_SIZE 128
 
 typedef unsigned char __user* usr_char;
-
+                
 extern int zv_func_replace_init(void);
 extern void zv_vm_exit_callback_int3(u64 inst_addr,unsigned long cr3);
 
