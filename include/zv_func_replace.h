@@ -13,12 +13,21 @@
 typedef unsigned char __user* usr_char;
                 
 extern int zv_func_replace_init(void);
-extern void zv_vm_exit_callback_int3(u64 inst_addr,unsigned long cr3);
+void zv_func_replace_exit(void);
+extern void zv_handle_function_hijack(u64 inst_addr,unsigned long guest_cr3);
 
-
-struct func{
-    char name[100];
-    unsigned char byte[2];
-    unsigned char flag;
-    u64 addr;
+/*
+ * Function hijack target structure
+ * Defines a function that will be intercepted for code injection.
+ * 
+ * Flag encoding:
+ *   bit 7: INT3_RETURN flag (1 = returning from int3, 0 = first int3 hit)  
+ *   bits 0-6: function identifier (0-127, used to distinguish functions)
+ */
+struct zv_hijack_target_func {
+    char func_name[100];           /* Name of function to intercept */
+    unsigned char saved_bytes[2];   /* Saved original bytes */
+    unsigned char hijack_flag;        /* hijack identifier + flags */
+    u64 origin_addr;             /* Function address */
 };
+

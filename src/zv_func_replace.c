@@ -11,211 +11,326 @@
 #include "../include/asm.h"
 #include "../include/zv_log.h"
 
+/* Varivables */
 static pid_t pid_parent;
 static pid_t pid_clone;
 int func_count;
-struct func funcs[128];
-char proc_buffer[200];
+struct zv_hijack_target_func funcs[128];
+char proc_buffer[128];
 struct mutex m;
-int main_clone_flag;
+int main_cow_triggered;
 unsigned long addr_space;
 
 unsigned char inst_clone[13]={
-    0x50,                      //push   %rax
+    0x50,                                //push   %rax
     0x48,0xc7,0xc0,0x39,0x00,0x00,0x00,  //mov    $0x39,%rax
-    0x0f,0x05,                     //syscall
-    0x58,                      //pop    %rax
-    0xcc,                      //int3
+    0x0f,0x05,                           //syscall
+    0x58,                                //pop    %rax
+    0xcc,                                //int3
 };
 
-static inline unsigned long zv_read_cr3(void);
-static inline void zv_write_cr3(unsigned long val);
-static inline void zv_write_cr0_wp_off(void);
-static inline void zv_write_cr0_wp_on(void);
 static ssize_t zv_proc_write(struct file *file, const char __user *ubuf, size_t count, loff_t *ppos);
-static int zv_find_func_index(u64 inst_addr,unsigned char flag);
-static void zv_func_replace(int func_index,unsigned char flag,unsigned char *inst,int len);
-static void zv_set_all_exec_code_writable(void);
+static int zv_parse_funcs_info(const char* buffer, int* out_count, struct zv_hijack_target_func *out_funcs);
+static int zv_lookup_target_func(u64 inst_addr,unsigned char flag);
+static void zv_int3_handler_dispatcher(int func_index,unsigned char flag,unsigned char *inst,int len);
+static void zv_handle_first_int3_hit(int func_index, unsigned char flag, unsigned char* inst, int len);
+static void zv_handle_int3_return(int func_index);
+static void zv_trigger_cow_for_executable_pages(void);
 static pte_t *zv_get_user_pte(struct mm_struct *mm, unsigned long addr);
 void zv_print_addr_pte(const char *name,u64 addr);
 
-static const struct proc_ops proc_file_ops = {
+static const struct proc_ops zv_func_replace_proc_fops = {
     .proc_write = zv_proc_write,
 };
 
-int zv_func_replace_init(void)
-{
-    /*create proc entry for clone*/
+int zv_func_replace_init(void) {
+    /* create proc entry for clone */
     struct proc_dir_entry *entry;
-    entry = proc_create("zv_func_replace", 0666, NULL, &proc_file_ops);
+
+    /* Variables init */
+    main_cow_triggered = 0;
+    func_count = 0;
+    pid_parent = 0;
+    pid_clone = 0;
+
+    entry = proc_create("zv_func_replace", 0666, NULL, &zv_func_replace_proc_fops);
     if (!entry) {
-        zv_log_write(LOG_NONE,"Func_replace","failed to create zv_func_replace_entry");
+        zv_log_write(LOG_NONE, "Func_replace", "failed to create zv_func_replace_entry");
         return -ENOMEM;
     }
-    zv_log_write(LOG_NORMAL,"Func_replace","/proc/zv_func_replace created");
-    main_clone_flag = 0;
+
     mutex_init(&m);
     return 0;
 }
 
-/*when zeroVisor catch int3, use this function to handle*/
-void zv_vm_exit_callback_int3(u64 inst_addr,unsigned long cr3){
+void zv_func_replace_exit(void) {
+    remove_proc_entry("zv_func_replace", NULL);
+    zv_log_write(LOG_NORMAL, "Func_replace", "Function replacement module exit");
+}
+
+static ssize_t zv_proc_write(
+    struct file *file,
+    const char __user *ubuf, 
+    size_t count, 
+    loff_t *ppos
+) {
+    int ret;
+
+    /* Basic verify */
+    if (count > BUFF_SIZE - 1) {
+        return -EINVAL;
+    } 
+    
+    if (copy_from_user(proc_buffer, ubuf, count)) {
+        return -EFAULT;
+    }
+    proc_buffer[count] = '\0';
+
+    ret = zv_parse_funcs_info(proc_buffer, &func_count, funcs);
+    if (ret < 0) {
+        return ret;
+    }
+
+    zv_log_write(LOG_NORMAL, "Func_replace", "Successfully parsed %d functions", func_count);
+    return count;
+}
+
+static int zv_parse_funcs_info(
+    const char* buffer,
+    int* out_count,
+    struct zv_hijack_target_func *out_funcs
+) {
+    int pos = 0;
+    int read_offset;
+    int parsed_count;
+    int i;
+
+    /* Parse the num of functions */
+    if (sscanf(buffer, "count: %d\n%n", &parsed_count, &read_offset) != 1) {
+        zv_log_write(LOG_NONE, "Func_replace", "Failed to parse function count");
+        return -EINVAL;
+    }
+
+    /* Basic range check */
+    if (parsed_count <= 0 || parsed_count > 128) {
+        zv_log_write(LOG_NONE, "Func_replace", "Invalid function count: %d", parsed_count);
+        return -EINVAL;
+    }
+
+    pos += read_offset;
+
+    /* Parse function */
+    for (i = 0; i < parsed_count; i ++) {
+        if (sscanf(buffer + pos, "%s %02hhx%02hhx %02hhx\n%n",
+                out_funcs[i].func_name,
+                &(out_funcs[i].saved_bytes[0]),
+                &(out_funcs[i].saved_bytes[1]),
+                &(out_funcs[i].hijack_flag),
+                &read_offset) != 4
+        ) {
+            zv_log_write(LOG_NONE, "Func_replace", "Failed to parse function %d", i);
+            return -EINVAL;
+        }
+
+        /* Basic check: name is non-null */
+        if (strlen(out_funcs[i].func_name) == 0) {
+            zv_log_write(LOG_NONE, "Func_replace", "Empty function name at index %d", i);
+            return -EINVAL;
+        }
+
+        /* Basic check: flag range check */
+        if ((out_funcs[i].hijack_flag & 0x7F) >= 128) {
+            zv_log_write(LOG_NONE, "Func_replace", "Invalid flag for function %s: %02hhx", 
+                        out_funcs[i].func_name, out_funcs[i].hijack_flag);
+            return -EINVAL;
+        }
+
+        /* Init address */
+        out_funcs[i].origin_addr = 0;
+
+        zv_log_write(LOG_NONE, "Func_replace", "Parsed func: %s bytes:%02hhx%02hhx flag:%02hhx",
+            out_funcs[i].func_name, out_funcs[i].saved_bytes[0], out_funcs[i].saved_bytes[1], out_funcs[i].hijack_flag);
+        
+        pos += read_offset;
+    }
+
+    *out_count = parsed_count;
+    return 0;
+}
+
+/* when zeroVisor catch int3, use this function to handle */
+void zv_handle_function_hijack(u64 inst_addr, unsigned long guest_cr3){
     int func_index;
     unsigned char flag;
-    int result;
+    int ret;
     unsigned long host_cr3;
-    /*save current cr3 and change cr3*/
-    mutex_lock(&m);
-    host_cr3 = zv_read_cr3();
-    zv_write_cr3(cr3);
 
-    /*
-    to distinguish functions,we write flag into byte behind int3，
-    bit 7 is to make sure whether we are in the return of int3,
-    bits 0-6 are used to mark functions 
-    */
-    result = copy_from_user(&flag,(usr_char)(((void *)(inst_addr+1))),1);
-    
-    func_index = zv_find_func_index(inst_addr,flag);
-    
-    if(strcmp(funcs[func_index].name,"main") == 0){ 
-        /*if we catch function main,we insert syscall fork*/
-        if(!main_clone_flag){
-            /*to trigger cow,we set all executable vma writable*/
-            zv_set_all_exec_code_writable();
-            main_clone_flag++;
-        }
-        /*arg len should include len of flag*/
-        zv_func_replace(func_index,flag,inst_clone,13);
-    }else{
-        zv_func_replace(func_index,flag,NULL,0);
+    /* save current cr3 and change cr3 */
+    mutex_lock(&m);
+    host_cr3 = zv_get_cr3();
+    zv_set_cr3(guest_cr3);
+
+    ret = copy_from_user(
+        &flag,
+        (usr_char)(((void *)(inst_addr + 1))),
+        1
+    );
+    if (ret != 0) {
+        zv_log_write(LOG_NONE, "Func_replace", "Failed to read flag from user space");
+        goto cleanup;
     }
+    
+    func_index = zv_lookup_target_func(inst_addr, flag);
+    if (func_index < 0) {
+        zv_log_write(LOG_NONE, "Func_replace", "Function not found for flag %02hhx", flag);
+        goto cleanup;
+    }
+    
+    if(strcmp(funcs[func_index].func_name,"main") == 0){ 
+        /* if we catch function main, we insert syscall fork */
+        if(! main_cow_triggered) {
+            /* to trigger cow, we set all executable vma writable */
+            zv_trigger_cow_for_executable_pages();
+            main_cow_triggered = 1;
+        }
+        /* args len should include len of flag */
+        zv_int3_handler_dispatcher(func_index, flag, inst_clone, 13);
+    }else{
+        zv_int3_handler_dispatcher(func_index, flag, NULL, 0);
+    }
+
+cleanup:
     /*recover cr3*/
-    zv_write_cr3(host_cr3);
+    zv_set_cr3(host_cr3);
     mutex_unlock(&m);
 }
 
+/**
+ * zv_lookup_target_func - Look up hijack target function and update address
+ * @inst_addr: Address of the INT3 instruction
+ * @flag: Flag byte containing function identifier and return status
+ *        bit 7: INT3_RETURN flag (1=returning from int3, 0=first int3 hit)
+ *        bits 0-6: function identifier (0-127)
+ * 
+ * Return: Function index (>=0) on success, -1 on failure
+ */
+static int zv_lookup_target_func(u64 inst_addr, unsigned char flag){
+    int i;
+    unsigned char func_id = FUNC_INDEX(flag);
+    
+    for (i = 0; i < func_count; i ++){
+        if(funcs[i].hijack_flag == func_id) {
+            /* First catch INT3 -> store origin_addr */
+            if(! (flag & INT3_RETURN)) funcs[i].origin_addr = inst_addr;
+            
+            zv_log_write(LOG_NORMAL, "Func_replace", 
+                        "Found function: %s, flag:%02hhx, addr:%llx",
+                        funcs[i].func_name, funcs[i].hijack_flag, funcs[i].origin_addr);
+            
+            return i;
+        }
+    }
 
-static void zv_set_all_exec_code_writable(void){
+    return -1;
+}
+
+static void zv_trigger_cow_for_executable_pages(void){
     struct vm_area_struct *vma;
     struct mm_struct *mm = current->mm;
-    printk(KERN_INFO "setting all page writable");
-    mmap_write_lock_killable(mm);
+    int ret;
+
+    if (!mm) {
+        zv_log_write(LOG_NONE, "Func_replace", "Current process has no mm_struct");
+        return;
+    }
+
+    zv_log_write(LOG_NORMAL, "Func_replace", "Setting executable pages writable for COW trigger");
+    
+    ret = mmap_write_lock_killable(mm);
+    if (ret) {
+        zv_log_write(LOG_NONE, "Func_replace", "Failed to acquire mmap write lock");
+        return;
+    }
+
     for (vma = mm->mmap; vma; vma = vma->vm_next){
         if (vma->vm_flags & VM_EXEC) {
             vma->vm_flags |= VM_WRITE | VM_MAYWRITE;
             vma->vm_flags &= ~ VM_DENYWRITE;
         }
     }
+
     mmap_write_unlock(mm);
+    zv_log_write(LOG_DETAIL, "Func_replace", "COW trigger setup completed");
 }
 
-
-static void zv_func_replace(int func_index,unsigned char flag,unsigned char *inst,int len){
-    
-    unsigned long addr;
-    int result;
-    if(!(flag&INT3_RETURN)){
-        pid_parent = current->pid;
-        /*allocate mem for the inserted inst*/
-        addr = vm_mmap(NULL,0,CEIL(len,PAGE_SIZE) * PAGE_SIZE,
-            VM_READ| VM_WRITE | VM_EXEC, 
-            MAP_ANONYMOUS | MAP_PRIVATE,
-            0
-        );
-
-        result = copy_to_user((usr_char)(funcs[func_index].addr),
-            funcs[func_index].byte,2);
-
-        /*if inst == NULL, do nothing*/
-        if(!inst){
-            zv_write_vmcs(VM_GUEST_RIP,funcs[func_index].addr);
-            return;
-        }
-
-        inst[len-1] = flag | INT3_RETURN;//to identify which func is and whether in int3 return  
-        result = copy_to_user((usr_char)addr,inst,len);
-        zv_write_vmcs(VM_GUEST_RIP,(u64)addr); 
-
-    }else{
-        if(current->pid != pid_parent){
-            pid_clone = current->pid;
-            zv_log_write(LOG_NORMAL,"Func_replace" , "Child pid:%d",current->pid);
-        }
-        /*change rip*/
-        zv_write_vmcs(VM_GUEST_RIP,funcs[func_index].addr);
+static void zv_int3_handler_dispatcher(
+    int func_index,
+    unsigned char flag,
+    unsigned char *inst,
+    int len
+) {
+    if (! (flag & INT3_RETURN)) {
+        zv_handle_first_int3_hit(func_index, flag, inst, len);
+    } else {
+        zv_handle_int3_return(func_index);
     }
+}
+
+/* Handle INT3 first hit */
+static void zv_handle_first_int3_hit(
+    int func_index,
+    unsigned char flag,
+    unsigned char* inst,
+    int len
+) {
+    unsigned long addr;
+
+    pid_parent = current->pid;
+
+    /* Allocate memory for inserted instruments */
+    addr = vm_mmap(
+        NULL,
+        0,
+        CEIL(len, PAGE_SIZE) * PAGE_SIZE,
+        VM_READ| VM_WRITE | VM_EXEC, 
+        MAP_ANONYMOUS | MAP_PRIVATE,
+        0
+    );
+
+    /* Recovery the origin instruments */
+    copy_to_user(
+        (usr_char)(funcs[func_index].origin_addr),
+        funcs[func_index].saved_bytes,
+        2
+    );
+
+    /* If inst is NULL -> do nothing */
+    if (! inst) {
+        zv_write_vmcs(VM_GUEST_RIP, funcs[func_index].origin_addr);
+        return;
+    }
+
+    /* Flag INT3 has been hit */
+    inst[len - 1] = flag | INT3_RETURN;
+
+    copy_to_user(
+        (usr_char)addr,
+        inst,
+        len
+    );
+
+    zv_write_vmcs(VM_GUEST_RIP, (u64)addr); 
     return;
 }
 
-static int zv_find_func_index(u64 inst_addr,unsigned char flag){
-    int i;
-    for( i = 0 ;i < func_count;i++){
-        if(funcs[i].flag == FUNC_INDEX(flag)){
-            if(!(flag&INT3_RETURN)) funcs[i].addr = inst_addr;
-            zv_log_write(LOG_NORMAL, "Func_replace", "find func,name:%s,flag:%02hhx,addr:%llX",funcs[i].name,funcs[i].flag,funcs[i].addr);
-            return i;
-        }
-    }
-    return -1;
-}
-
-static ssize_t zv_proc_write(struct file *file, const char __user *ubuf, size_t count, loff_t *ppos)
-{
-    int i;
-    int pos=0;
-    int read_setoff;
-    if (count > BUFF_SIZE - 1)
-        return -EINVAL;
-
-    if (copy_from_user(proc_buffer, ubuf, count))
-        return -EFAULT;
-
-    proc_buffer[count] = '\0';
-    sscanf(proc_buffer, "count: %d\n%n",&func_count,&read_setoff);
-    pos += read_setoff;
-
-    for(i = 0;i < func_count;i++){
-        sscanf(proc_buffer + pos, "%s %02hhx%02hhx %02hhx\n%n",funcs[i].name,
-            &(funcs[i].byte[0]),&(funcs[i].byte[1]),&(funcs[i].flag),&read_setoff);
-        zv_log_write(LOG_NONE, "Func_replace", "func_name:%s func_bytes:%02hhx%02hhx func_flag:%02hhx",funcs[i].name,
-            (funcs[i].byte[0]),(funcs[i].byte[1]),(funcs[i].flag));
-        pos += read_setoff;
+static void zv_handle_int3_return(int func_index) {
+    if (current->pid != pid_parent) {
+        pid_clone = current->pid;
+        zv_log_write(LOG_NORMAL, "Func_replace", "Child pid:%d", pid_clone);
     }
 
-    return count;
-}
-
-
-static inline unsigned long zv_read_cr3(void)
-{
-    unsigned long val;
-    asm volatile("mov %%cr3, %0" : "=r"(val));
-    return val;
-}
-
-static inline void zv_write_cr3(unsigned long val)
-{
-    asm volatile("mov %0, %%cr3" :: "r"(val) : "memory");
-}
-
-static inline void zv_write_cr0_wp_off(void)
-{
-    unsigned long cr0;
-
-    asm volatile("mov %%cr0, %0" : "=r" (cr0));
-    cr0 &= ~(1UL << 16);
-    asm volatile("mov %0, %%cr0" :: "r" (cr0) : "memory");
-
-}
-
-static inline void zv_write_cr0_wp_on(void)
-{
-    unsigned long cr0;
-
-    asm volatile("mov %%cr0, %0" : "=r" (cr0));
-    cr0 |= (1UL << 16);
-    asm volatile("mov %0, %%cr0" :: "r" (cr0) : "memory");
+    /* reset RIP */
+    zv_write_vmcs(VM_GUEST_RIP, funcs[func_index].origin_addr);
 }
 
 //functions to debug
@@ -225,7 +340,7 @@ static pte_t *zv_get_user_pte(struct mm_struct *mm, unsigned long addr)
     p4d_t *p4d;
     pud_t *pud;
     pmd_t *pmd;
-    pte_t *pte;
+    pte_t *pte; 
 
     if (!mm)
         return NULL;
@@ -235,19 +350,19 @@ static pte_t *zv_get_user_pte(struct mm_struct *mm, unsigned long addr)
     if (pgd_none(*pgd) || pgd_bad(*pgd))
         return NULL;
 
-    p4d = p4d_offset(pgd, addr);       
+    p4d = p4d_offset(pgd, addr);
     if (p4d_none(*p4d) || p4d_bad(*p4d))
         return NULL;
 
-    pud = pud_offset(p4d, addr);       
+    pud = pud_offset(p4d, addr);
     if (pud_none(*pud) || pud_bad(*pud))
         return NULL;
 
-    pmd = pmd_offset(pud, addr);      
+    pmd = pmd_offset(pud, addr);
     if (pmd_none(*pmd) || pmd_bad(*pmd))
         return NULL;
 
-    pte = pte_offset_map(pmd, addr);  
+    pte = pte_offset_map(pmd, addr);
     if (!pte)
         return NULL;
 
@@ -256,7 +371,7 @@ static pte_t *zv_get_user_pte(struct mm_struct *mm, unsigned long addr)
 
 void zv_print_addr_pte(const char *name,u64 addr){
     pte_t *pte = zv_get_user_pte(current->mm,addr);
-    if(pte == NULL){
+    if(pte == NULL) {
         printk(KERN_INFO "%s_PTE:%d",name,0);
         return;
     }

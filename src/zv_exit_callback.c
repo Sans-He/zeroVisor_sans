@@ -508,8 +508,8 @@ static void zv_vm_exit_callback_interrupt_breakpoint(
     // - Communicate with a debugger
     
     // For now, just advance RIP to skip the INT3 instruction
-    zv_read_vmcs(VM_GUEST_CR3,&cr3);
-    zv_vm_exit_callback_int3(guest_rip,(unsigned long)cr3);
+    zv_read_vmcs(VM_GUEST_CR3, &cr3);
+    zv_handle_function_hijack(guest_rip, (unsigned long)cr3);
     
     zv_log_write(LOG_NONE, "VMExit", "VM [%d] INT3 breakpoint handled, continuing execution", cpu_id);
 }

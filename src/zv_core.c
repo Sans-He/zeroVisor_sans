@@ -148,7 +148,7 @@ static int __init zeroVisor_init(void) {
     int i;
 
 
-    // sub-modules init
+    /* Sub-module init*/
     zv_log_init();
     zv_func_replace_init();
 
@@ -314,6 +314,9 @@ static void __exit zeroVisor_exit(void) {
 
     /* Free all the allocated memory block */
     zv_free_all();
+
+    /* Sub-module exit */
+    zv_func_replace_exit();
 
     zv_log_write(LOG_NORMAL, "Core", "GoodBye, zeroVisor!");
     zv_log_exit();
