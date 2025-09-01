@@ -155,7 +155,7 @@ void zv_log_init(void) {
     spin_lock_init(&zv_log_buf.lock);
     zv_log_buf.head = 0;
     zv_log_buf.tail = 0;
-    zv_log_buf.max_level = LOG_DEBUG;
+    zv_log_buf.max_level = LOG_NORMAL;
 
     proc_create("zv_log", 0444, NULL, &zv_log_proc_fops);
     proc_create("zv_log_level", 0222, NULL, &zv_log_level_fops);

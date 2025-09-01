@@ -15,6 +15,7 @@
 #include <../include/zv_mmu.h>
 #include <../include/asm.h>
 #include <../include/zv_exit_callback.h>
+#include "../include/zv_func_replace.h"
 
 /* Shutdown Variables */
 int g_is_shutdown_trigger_set = 0;
@@ -482,7 +483,8 @@ static void zv_vm_exit_callback_interrupt_breakpoint(
 ) {
     u64 guest_rip;
     u64 inst_length;
-    
+    u64 cr3;
+
     zv_read_vmcs(VM_GUEST_RIP, &guest_rip);
     zv_read_vmcs(VM_DATA_VM_EXIT_INST_LENGTH, &inst_length);
     
@@ -506,7 +508,8 @@ static void zv_vm_exit_callback_interrupt_breakpoint(
     // - Communicate with a debugger
     
     // For now, just advance RIP to skip the INT3 instruction
-    zv_advance_vm_guest_rip();
+    zv_read_vmcs(VM_GUEST_CR3, &cr3);
+    zv_handle_function_hijack(guest_rip, (unsigned long)cr3);
     
     zv_log_write(LOG_NONE, "VMExit", "VM [%d] INT3 breakpoint handled, continuing execution", cpu_id);
 }
