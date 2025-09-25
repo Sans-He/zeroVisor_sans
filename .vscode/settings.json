@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "zv_dev_memory.h": "c",
+        "string.h": "c"
+    }
+}

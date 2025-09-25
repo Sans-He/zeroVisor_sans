@@ -35,6 +35,11 @@ clean:
 	rm -f $(BUILD_DIR)/zeroVisor.ko
 	@$(MAKE) clean_tmp
 
+reset:
+	sudo rmmod zeroVisor
+	sudo make
+	sudo make install
+
 install:
 	sudo insmod $(BUILD_DIR)/zeroVisor.ko
 

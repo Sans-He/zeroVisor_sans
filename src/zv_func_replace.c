@@ -10,31 +10,26 @@
 #include "../include/zv_func_replace.h"
 #include "../include/asm.h"
 #include "../include/zv_log.h"
+#include "../include/zv_func_search.h"
 
 /* Varivables */
-static pid_t pid_parent;
-static pid_t pid_clone;
+static pid_t pid_parent = 0;
+static pid_t pid_clone = 0;
 int func_count;
 struct zv_hijack_target_func funcs[128];
+char inst_temp[PAGE_SIZE * 4]; /*Malloc space to handle inst*/
 char proc_buffer[128];
 struct mutex m;
 int main_cow_triggered;
 unsigned long addr_space;
 
-unsigned char inst_clone[13]={
-    0x50,                                //push   %rax
-    0x48,0xc7,0xc0,0x39,0x00,0x00,0x00,  //mov    $0x39,%rax
-    0x0f,0x05,                           //syscall
-    0x58,                                //pop    %rax
-    0xcc,                                //int3
-};
 
 static ssize_t zv_proc_write(struct file *file, const char __user *ubuf, size_t count, loff_t *ppos);
 static int zv_parse_funcs_info(const char* buffer, int* out_count, struct zv_hijack_target_func *out_funcs);
 static int zv_lookup_target_func(u64 inst_addr,unsigned char flag);
-static void zv_int3_handler_dispatcher(int func_index,unsigned char flag,unsigned char *inst,int len);
-static void zv_handle_first_int3_hit(int func_index, unsigned char flag, unsigned char* inst, int len);
-static void zv_handle_int3_return(int func_index);
+static void zv_int3_handler_dispatcher(int func_index,unsigned char flagn);
+static void zv_handle_first_int3_hit(int func_index, unsigned char flag, bool is_replace);
+static void zv_handle_int3_return(int func_index , bool is_jump);
 static void zv_trigger_cow_for_executable_pages(void);
 static pte_t *zv_get_user_pte(struct mm_struct *mm, unsigned long addr);
 void zv_print_addr_pte(const char *name,u64 addr);
@@ -106,7 +101,7 @@ static int zv_parse_funcs_info(
     int i;
 
     /* Parse the num of functions */
-    if (sscanf(buffer, "count: %d\n%n", &parsed_count, &read_offset) != 1) {
+    if (sscanf(buffer, "count:%d\n%n", &parsed_count, &read_offset) != 1) {
         zv_log_write(LOG_NONE, "Func_replace", "Failed to parse function count");
         return -EINVAL;
     }
@@ -194,9 +189,9 @@ void zv_handle_function_hijack(u64 inst_addr, unsigned long guest_cr3){
             main_cow_triggered = 1;
         }
         /* args len should include len of flag */
-        zv_int3_handler_dispatcher(func_index, flag, inst_clone, 13);
+        zv_int3_handler_dispatcher(func_index, flag);
     }else{
-        zv_int3_handler_dispatcher(func_index, flag, NULL, 0);
+        zv_int3_handler_dispatcher(func_index, flag);
     }
 
 cleanup:
@@ -265,14 +260,13 @@ static void zv_trigger_cow_for_executable_pages(void){
 
 static void zv_int3_handler_dispatcher(
     int func_index,
-    unsigned char flag,
-    unsigned char *inst,
-    int len
+    unsigned char flag
 ) {
     if (! (flag & INT3_RETURN)) {
-        zv_handle_first_int3_hit(func_index, flag, inst, len);
+        zv_handle_first_int3_hit(func_index, flag, (pid_parent == 0 || (!(current->pid == pid_parent))));
     } else {
-        zv_handle_int3_return(func_index);
+        if(strcmp(funcs[func_index].func_name,"main") == 0) zv_handle_int3_return(func_index,false);
+        else zv_handle_int3_return(func_index,true);
     }
 }
 
@@ -280,57 +274,75 @@ static void zv_int3_handler_dispatcher(
 static void zv_handle_first_int3_hit(
     int func_index,
     unsigned char flag,
-    unsigned char* inst,
-    int len
+    bool is_replace
 ) {
     unsigned long addr;
+    int ret;
+    struct zv_replace_inst inst_struct;
 
-    pid_parent = current->pid;
+    if(pid_parent == 0) pid_parent = current->pid;
 
-    /* Allocate memory for inserted instruments */
+    /* Recovery the origin instruments */
+    ret = copy_to_user(
+        (usr_char)(funcs[func_index].origin_addr),
+        funcs[func_index].saved_bytes,
+        2
+    );
+    /* Do nothing*/
+    if (!is_replace) {
+        zv_write_vmcs(VM_GUEST_RIP, funcs[func_index].origin_addr);
+        return;
+    }
+
+    /*Find inst and copy it into temp*/
+    ret = zv_func_search(flag,&inst_struct);
+
+    memcpy(
+        inst_temp,
+        inst_struct.inst_addr,
+        inst_struct.inst_size
+    );
+
+    /*Handle inst(TO_DO)*/
+    
+
+    /* Flag INT3 has been hit */
+    inst_temp[inst_struct.inst_size - 1] = flag | INT3_RETURN; //The end of the inst may not be inst.size -1 because of the previous process of inst
+
+    /* Allocate memory for inserted instruments and copy*/
     addr = vm_mmap(
         NULL,
         0,
-        CEIL(len, PAGE_SIZE) * PAGE_SIZE,
+        PAGE_SIZE * 4,
         VM_READ| VM_WRITE | VM_EXEC, 
         MAP_ANONYMOUS | MAP_PRIVATE,
         0
     );
 
-    /* Recovery the origin instruments */
-    copy_to_user(
-        (usr_char)(funcs[func_index].origin_addr),
-        funcs[func_index].saved_bytes,
-        2
-    );
-
-    /* If inst is NULL -> do nothing */
-    if (! inst) {
-        zv_write_vmcs(VM_GUEST_RIP, funcs[func_index].origin_addr);
-        return;
-    }
-
-    /* Flag INT3 has been hit */
-    inst[len - 1] = flag | INT3_RETURN;
-
-    copy_to_user(
+    ret = copy_to_user(
         (usr_char)addr,
-        inst,
-        len
+        inst_temp,
+        inst_struct.inst_size
     );
 
     zv_write_vmcs(VM_GUEST_RIP, (u64)addr); 
     return;
 }
 
-static void zv_handle_int3_return(int func_index) {
-    if (current->pid != pid_parent) {
+static void zv_handle_int3_return(int func_index , bool is_jump) {
+    if (current->pid != pid_parent && pid_clone == 0) {
         pid_clone = current->pid;
         zv_log_write(LOG_NORMAL, "Func_replace", "Child pid:%d", pid_clone);
     }
-
     /* reset RIP */
-    zv_write_vmcs(VM_GUEST_RIP, funcs[func_index].origin_addr);
+    if(is_jump){
+        zv_log_write(LOG_DEBUG, "Func_replace","reset and jump rip to: %16llx",funcs[func_index].origin_addr + 5);
+        zv_write_vmcs(VM_GUEST_RIP, funcs[func_index].origin_addr + 5);
+    }
+    else {
+        zv_log_write(LOG_DEBUG, "Func_replace","reset rip to: %16llx",funcs[func_index].origin_addr);
+        zv_write_vmcs(VM_GUEST_RIP, funcs[func_index].origin_addr);
+    }
 }
 
 //functions to debug
@@ -372,8 +384,8 @@ static pte_t *zv_get_user_pte(struct mm_struct *mm, unsigned long addr)
 void zv_print_addr_pte(const char *name,u64 addr){
     pte_t *pte = zv_get_user_pte(current->mm,addr);
     if(pte == NULL) {
-        printk(KERN_INFO "%s_PTE:%d",name,0);
+        zv_log_write(LOG_DEBUG, "Func_replace", "%s_PTE:%d",name,0);
         return;
     }
-    printk(KERN_INFO "%s_PTE:%lx",name,pte_val(*pte));
+    zv_log_write(LOG_DEBUG, "Func_replace", "%s_PTE:%lx",name,pte_val(*pte));
 }

@@ -2,7 +2,9 @@
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
 #include <linux/pagewalk.h>
+
 #include "../include/zv_types.h"
+#include "../include/zv_func_search.h"
 
 #define MAP_ANONYMOUS	0x20		/* don't use a file */
 #define MAP_PRIVATE	0x02		/* Changes are private */
